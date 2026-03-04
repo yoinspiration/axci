@@ -31,6 +31,9 @@ CLEANUP=true
 DRY_RUN=false
 PARALLEL=true
 OUTPUT_DIR=""
+USE_GIT=false
+GIT_BRANCH=""
+CLEAN_RESULTS=false
 
 # 帮助信息
 show_help() {
@@ -49,6 +52,9 @@ Hypervisor Test Framework - 本地测试脚本
   --no-cleanup               不清理临时文件
   --dry-run                  仅显示将要执行的命令
   --sequential               顺序执行测试 (不并行)
+  --from-git                 从 git 仓库拉取代码 (默认从 crates.io 下载)
+  --branch BRANCH            指定 git 分支 (仅与 --from-git 一起使用)
+  --clean                    清理测试生成的 test-results 目录
   -h, --help                 显示此帮助
 
 测试目标:
@@ -120,6 +126,18 @@ parse_args() {
                 PARALLEL=false
                 shift
                 ;;
+            --from-git)
+                USE_GIT=true
+                shift
+                ;;
+            --branch)
+                GIT_BRANCH="$2"
+                shift 2
+                ;;
+            --clean)
+                CLEAN_RESULTS=true
+                shift
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -149,28 +167,34 @@ error() { log_error "$1"; exit 1; }
 # 检查依赖
 check_dependencies() {
     log "检查依赖..."
-    
+
     local missing=()
-    
+
     # 检查 jq
     if ! command -v jq &> /dev/null; then
         missing+=("jq")
     fi
-    
+
     # 检查 git
     if ! command -v git &> /dev/null; then
         missing+=("git")
     fi
-    
+
     # 检查 cargo
     if ! command -v cargo &> /dev/null; then
         missing+=("cargo (Rust)")
     fi
-    
+
     if [ ${#missing[@]} -gt 0 ]; then
         error "缺少依赖: ${missing[*]}\n请安装后重试。"
     fi
-    
+
+    # 检查并安装 cargo-clone
+    if ! command -v cargo-clone &> /dev/null && ! cargo clone --help &> /dev/null; then
+        log "安装 cargo-clone..."
+        cargo install cargo-clone
+    fi
+
     log_success "依赖检查通过"
 }
 
@@ -530,6 +554,12 @@ run_test_target() {
     
     local repo_url=$(echo "$target_config" | jq -r '.repo.url')
     local repo_branch=$(echo "$target_config" | jq -r '.repo.branch // "main"')
+    
+    # 如果指定了 --branch 参数，则使用指定的分支
+    if [ -n "$GIT_BRANCH" ]; then
+        repo_branch="$GIT_BRANCH"
+        log "  使用指定分支: $repo_branch"
+    fi
     local test_type=$(echo "$target_config" | jq -r '.type // "qemu"')
     local build_cmd=$(echo "$target_config" | jq -r '.build.command')
     local timeout_min=$(echo "$target_config" | jq -r '.build.timeout_minutes // 15')
@@ -544,25 +574,49 @@ run_test_target() {
     
     # 克隆或更新仓库
     if [ ! -d "$test_dir" ]; then
-        log "  克隆仓库..."
-        if [ "$DRY_RUN" == true ]; then
-            echo "[DRY-RUN] git clone --depth 1 -b $repo_branch $repo_url $test_dir"
-        else
-            if ! git clone --depth 1 -b $repo_branch "$repo_url" "$test_dir" >> "$log_file" 2>&1; then
-                log_error "  克隆仓库失败: $repo_url"
-                echo "failed" > "$status_file"
-                return 1
+        # 判断是否为 axvisor 目标，且未使用 --git 选项时，使用 cargo clone 从 crates.io 下载
+        if [[ "$target_name" == axvisor-* ]] && [ "$USE_GIT" == false ]; then
+            log "  从 crates.io 下载 axvisor..."
+            if [ "$DRY_RUN" == true ]; then
+                echo "[DRY-RUN] cargo clone axvisor -- $test_dir"
+                echo "[DRY-RUN] cd $test_dir && cargo clone axvisor-build"
+            else
+                if ! cargo clone axvisor -- "$test_dir" >> "$log_file" 2>&1; then
+                    log_error "  下载 axvisor 失败"
+                    echo "failed" > "$status_file"
+                    return 1
+                fi
+                log "  下载 axvisor-build 构建工具..."
+                if ! (cd "$test_dir" && cargo clone axvisor-build) >> "$log_file" 2>&1; then
+                    log_warn "  下载 axvisor-build 失败，尝试继续..."
+                fi
             fi
-            # 初始化子模块
-            if [ -f "$test_dir/.gitmodules" ]; then
-                log "  初始化子模块..."
-                (cd "$test_dir" && git submodule update --init --recursive) >> "$log_file" 2>&1 || true
+        else
+            log "  克隆仓库..."
+            if [ "$DRY_RUN" == true ]; then
+                echo "[DRY-RUN] git clone --depth 1 -b $repo_branch $repo_url $test_dir"
+            else
+                if ! git clone --depth 1 -b $repo_branch "$repo_url" "$test_dir" >> "$log_file" 2>&1; then
+                    log_error "  克隆仓库失败: $repo_url"
+                    echo "failed" > "$status_file"
+                    return 1
+                fi
+                # 初始化子模块
+                if [ -f "$test_dir/.gitmodules" ]; then
+                    log "  初始化子模块..."
+                    (cd "$test_dir" && git submodule update --init --recursive) >> "$log_file" 2>&1 || true
+                fi
             fi
         fi
     else
         log "  更新仓库..."
         if [ "$DRY_RUN" != true ]; then
-            (cd "$test_dir" && git pull) >> "$log_file" 2>&1 || true
+            if [[ "$target_name" == axvisor-* ]] && [ "$USE_GIT" == false ]; then
+                # axvisor 使用 cargo clone，不进行 git pull
+                log "  axvisor 从 crates.io 下载，跳过更新"
+            else
+                (cd "$test_dir" && git pull) >> "$log_file" 2>&1 || true
+            fi
         fi
     fi
     
@@ -1169,6 +1223,25 @@ cleanup() {
 # 主函数
 main() {
     parse_args "$@"
+
+    # 处理 --clean 命令
+    if [ "$CLEAN_RESULTS" == true ]; then
+        if [ -z "$OUTPUT_DIR" ]; then
+            # 如果未指定输出目录，使用默认目录
+            if [ -z "$COMPONENT_DIR" ]; then
+                COMPONENT_DIR="$(pwd)"
+            fi
+            OUTPUT_DIR="$COMPONENT_DIR/test-results"
+        fi
+        if [ -d "$OUTPUT_DIR" ]; then
+            log "清理测试目录: $OUTPUT_DIR"
+            rm -rf "$OUTPUT_DIR"
+            log_success "清理完成"
+        else
+            log "测试目录不存在: $OUTPUT_DIR"
+        fi
+        exit 0
+    fi
 
     echo -e "${CYAN}════════════════════════════════════════${NC}"
     echo -e "${CYAN}  Hypervisor Test Framework${NC}"
