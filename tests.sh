@@ -513,6 +513,59 @@ get_test_targets() {
     echo "${targets[@]}"
 }
 
+# 检查组件是否被目标项目使用（从 Cargo.lock 中检索）
+# 返回 0 表示使用，1 表示未使用
+check_component_used() {
+    local target_name=$1
+    local test_dir=$2
+    
+    # 如果不是 axvisor 或 starry 相关的测试，直接返回使用
+    if [[ "$target_name" != axvisor-* ]] && [[ "$target_name" != starry-* ]]; then
+        return 0
+    fi
+    
+    local cargo_lock="$test_dir/Cargo.lock"
+    
+    # 如果 Cargo.lock 不存在，尝试从 Cargo.toml 检查
+    if [ ! -f "$cargo_lock" ]; then
+        local cargo_toml="$test_dir/Cargo.toml"
+        if [ ! -f "$cargo_toml" ]; then
+            log_warn "  未找到 Cargo.toml 或 Cargo.lock，无法检查依赖关系"
+            return 0
+        fi
+        
+        # 从 Cargo.toml 检查是否有该组件的依赖
+        if grep -q "^$COMPONENT_CRATE\s*=" "$cargo_toml" 2>/dev/null; then
+            log_debug "  在 Cargo.toml 中找到组件: $COMPONENT_CRATE"
+            return 0
+        fi
+        
+        # 检查 workspace members 是否可能包含该组件
+        if grep -q "^$COMPONENT_CRATE\s*=" "$test_dir"/*/Cargo.toml 2>/dev/null; then
+            log_debug "  在 workspace member 中找到组件: $COMPONENT_CRATE"
+            return 0
+        fi
+        
+        return 1
+    fi
+    
+    # 从 Cargo.lock 中检查组件
+    # Cargo.lock 格式：[[package]] name = "crate-name"
+    if grep -A 1 '^\[\[package\]\]' "$cargo_lock" 2>/dev/null | grep -q "name = \"$COMPONENT_CRATE\""; then
+        log_debug "  在 Cargo.lock 中找到组件: $COMPONENT_CRATE"
+        return 0
+    fi
+    
+    # 如果直接没找到，尝试从 Cargo.toml 再确认一下（可能是间接依赖）
+    local cargo_toml="$test_dir/Cargo.toml"
+    if [ -f "$cargo_toml" ] && grep -q "^$COMPONENT_CRATE\s*=" "$cargo_toml" 2>/dev/null; then
+        log_debug "  在 Cargo.toml 中找到组件: $COMPONENT_CRATE"
+        return 0
+    fi
+    
+    return 1
+}
+
 # 检查并关闭占用端口5555的程序
 kill_port_5555_processes() {
     local pids=$(lsof -ti :5555 2>/dev/null)
@@ -627,6 +680,15 @@ run_test_target() {
         log "  DRY RUN: 跳过 patch、构建和测试"
         echo "skipped" > "$status_file"
         return 2
+    fi
+    
+    # 检查当前组件是否被目标项目使用（针对 axvisor/starry 测试）
+    if [[ "$target_name" == axvisor-* ]] || [[ "$target_name" == starry-* ]]; then
+        if ! check_component_used "$target_name" "$test_dir"; then
+            log_warn "  跳过测试: 当前组件 '$COMPONENT_CRATE' 未在 $target_name 的依赖中使用"
+            echo "skipped" > "$status_file"
+            return 2
+        fi
     fi
     
     # 应用 patch - 与 CI 逻辑保持一致
