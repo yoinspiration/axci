@@ -409,12 +409,13 @@ setup_output() {
     log_debug "输出目录: $OUTPUT_DIR"
 }
 
-# 运行命令并监控输出，检测成功标识符
+# 运行命令并监控输出，检测成功/失败标识符
 run_with_success_detection() {
     local cmd="$1"
     local timeout_minutes="$2"
     local log_file="$3"
     local success_patterns=()
+    local error_patterns=()
 
     # 定义成功标识符模式（支持通配符）
     success_patterns+=("Welcome to")
@@ -426,45 +427,77 @@ run_with_success_detection() {
     success_patterns+=("starry:~#")
     success_patterns+=("Last login:")
 
+    # 定义错误标识符模式
+    error_patterns+=("error:")
+    error_patterns+=("error[")
+    error_patterns+=("FAILED")
+    error_patterns+=("panicked")
+    error_patterns+=("segmentation fault")
+    error_patterns+=("core dumped")
+
+    # 创建临时文件来存储状态
+    local status_file=$(mktemp)
+    echo "running" > "$status_file"
+
     # 使用 timeout 运行命令，同时监控输出
     local pid=""
     local fifo=$(mktemp -u)
     mkfifo "$fifo"
 
-    # 启动命令并将输出重定向到管道和日志
+    # 启动命令并将输出重定向到管道
     eval "$cmd" < /dev/null > "$fifo" 2>&1 &
     pid=$!
 
-    # 读取管道并检测成功标识符
-    while IFS= read -r line; do
-        # 输出到日志
-        echo "$line" >> "$log_file"
+    # 在后台读取管道并检测成功/错误标识符
+    (
+        while IFS= read -r line; do
+            # 输出到日志
+            echo "$line" >> "$log_file"
 
-        # 检测是否匹配任何成功标识符
-        for pattern in "${success_patterns[@]}"; do
-            if [[ "$line" == *"$pattern"* ]]; then
-                rm -f "$fifo"
-                kill $pid 2>/dev/null || true
-                wait $pid 2>/dev/null || true
-                return 0
-            fi
-        done
-    done < "$fifo" &
+            # 检测是否匹配任何错误标识符（优先检测错误）
+            for pattern in "${error_patterns[@]}"; do
+                if [[ "$line" == *"$pattern"* ]]; then
+                    echo "error:$pattern" > "$status_file"
+                    kill $pid 2>/dev/null || true
+                    exit 0
+                fi
+            done
 
-    # 设置超时
-    timeout "${timeout_minutes}m" tail --pid=$pid -f /dev/null
+            # 检测是否匹配任何成功标识符
+            for pattern in "${success_patterns[@]}"; do
+                if [[ "$line" == *"$pattern"* ]]; then
+                    echo "success" > "$status_file"
+                    kill $pid 2>/dev/null || true
+                    exit 0
+                fi
+            done
+        done < "$fifo"
+    ) &
+    local monitor_pid=$!
+
+    # 设置超时等待进程完成
+    timeout "${timeout_minutes}m" tail --pid=$pid -f /dev/null 2>/dev/null || true
     local exit_code=$?
 
-    # 清理
-    rm -f "$fifo"
+    # 等待监控进程完成
+    wait $monitor_pid 2>/dev/null || true
 
-    if [ $exit_code -eq 124 ]; then
-        return 124
-    elif [ $exit_code -eq 0 ]; then
-        # 检查是否因为检测到成功标识符而提前退出
+    # 读取状态
+    local status=$(cat "$status_file")
+
+    # 清理
+    rm -f "$fifo" "$status_file"
+
+    # 根据状态返回结果
+    if [[ "$status" == error:* ]]; then
+        local pattern=${status#error:}
+        return 1
+    elif [ "$status" = "success" ]; then
         return 0
+    elif [ $exit_code -eq 124 ]; then
+        return 124
     else
-        return $exit_code
+        return 1
     fi
 }
 
@@ -1345,7 +1378,7 @@ main() {
     if [ $result -eq 0 ]; then
         log_success "所有测试通过!"
     elif [ $result -eq 2 ]; then
-        log_warn "部分测试被跳过（需要硬件）"
+        log_warn "部分测试被跳过"
     else
         log_error "部分测试失败"
     fi
