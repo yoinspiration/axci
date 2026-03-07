@@ -11,7 +11,7 @@ success_regex = [
     "All tests passed!",
     "Hello World!",
     "root@firefly:~#",
-    "root@phytium-Ubuntu:~#",
+    "^Phytium Pi",
     "Set hostname to <phytiumpi>",
     "Last login: *",
 ]

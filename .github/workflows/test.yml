@@ -41,6 +41,13 @@ jobs:
       axvisor_count: ${{ steps.matrix.outputs.axvisor_count }}
       starry_count: ${{ steps.matrix.outputs.starry_count }}
     steps:
+      - name: Harden git network settings
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 104857600
+
       - name: Build dynamic matrix from test_targets input
         id: matrix
         run: |
@@ -150,13 +157,22 @@ jobs:
           [ -d .git/modules ] && rm -rf .git/modules || true
           [ -d .git ] && git clean -ffdx || true
 
+      - name: Harden git network settings
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 104857600
+
       - name: Checkout component
         uses: actions/checkout@v4
+        timeout-minutes: 10
         with:
           path: component
 
       - name: Checkout axvisor
         uses: actions/checkout@v4
+        timeout-minutes: 10
         with:
           repository: arceos-hypervisor/axvisor
           ref: master
@@ -265,13 +281,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Harden git network settings
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 104857600
+
       - name: Checkout component
         uses: actions/checkout@v4
+        timeout-minutes: 10
         with:
           path: component
 
       - name: Checkout StarryOS
         uses: actions/checkout@v4
+        timeout-minutes: 10
         with:
           repository: Starry-OS/StarryOS
           ref: main
