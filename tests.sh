@@ -165,6 +165,30 @@ log_debug() {
 
 error() { log_error "$1"; exit 1; }
 
+# 判断当前目标是否会运行 Starry 测试
+requires_starry_tooling() {
+    case "$TEST_TARGET" in
+        all|starry|starry-*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# 判断当前目标是否会运行 Starry aarch64（需要 musl 交叉编译器）
+requires_starry_aarch64_tooling() {
+    case "$TEST_TARGET" in
+        all|starry|starry-aarch64)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # 检查依赖
 check_dependencies() {
     log "检查依赖..."
@@ -200,9 +224,23 @@ check_dependencies() {
     if ! command -v curl &> /dev/null; then
         missing+=("curl")
     fi
+
+    # Starry 构建依赖（仅在会运行 Starry 目标时检查）
+    if requires_starry_tooling; then
+        if ! command -v cmake &> /dev/null; then
+            missing+=("cmake (Starry rootfs/build 依赖)")
+        fi
+    fi
+
+    # Starry aarch64 构建依赖（lwext4 依赖 musl 交叉 C 编译器）
+    if requires_starry_aarch64_tooling; then
+        if ! command -v aarch64-linux-musl-cc &> /dev/null && ! command -v aarch64-linux-musl-gcc &> /dev/null; then
+            missing+=("aarch64-linux-musl-cc 或 aarch64-linux-musl-gcc (Starry aarch64 musl 交叉编译器)")
+        fi
+    fi
     
     if [ ${#missing[@]} -gt 0 ]; then
-        error "缺少依赖: ${missing[*]}\n请安装后重试。"
+        error "缺少依赖: ${missing[*]}\n请安装后重试。若是 Starry aarch64，可参考 setup-musl prebuilt 工具链。"
     fi
     
     log_success "依赖检查通过"
@@ -992,7 +1030,10 @@ EOF
                     if timeout "${timeout_min}m" sh -c "make rootfs ARCH=$arch" >> "$log_file" 2>&1; then
                         log_success "  Rootfs 准备成功"
                     else
-                        log_warn "  Rootfs 准备失败，继续测试（可能影响测试结果）"
+                        log_error "  Rootfs 准备失败: $target_name"
+                        set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
+                        cd "$COMPONENT_DIR"
+                        return 1
                     fi
                 fi
             else
@@ -1344,7 +1385,8 @@ EOF
         elif [[ "$target_name" == starry-* ]]; then
             # Starry 测试
             local arch=$(echo "$target_config" | jq -r '.arch')
-            full_test_cmd="make ARCH=$arch run"
+            # 使用 Starry 官方 CI 脚本，避免 make run 长驻导致超时
+            full_test_cmd="scripts/ci-test.py $arch"
         fi
 
         if [ "$DRY_RUN" == true ]; then
@@ -1352,6 +1394,12 @@ EOF
         else
             cd "$test_dir"
             export RUST_LOG=debug
+            if [[ "$target_name" == starry-* ]] && [ ! -f "$test_dir/disk.img" ]; then
+                log_error "  缺少 rootfs 镜像: $test_dir/disk.img"
+                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
+                cd "$COMPONENT_DIR"
+                return 1
+            fi
             # Board 测试通过 PTY 运行，避免 crossterm 在非 TTY 环境异常。
             if [[ "$target_name" == axvisor-board-* ]]; then
                 timeout "${test_timeout}m" script -q -c "$full_test_cmd" /dev/null 2>&1 | tee -a "$log_file"
