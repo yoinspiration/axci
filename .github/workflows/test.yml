@@ -29,77 +29,133 @@ on:
         type: string
 
 jobs:
+  detect:
+    name: "Detect test matrix"
+    runs-on: ubuntu-latest
+    outputs:
+      axvisor_matrix: ${{ steps.matrix.outputs.axvisor_matrix }}
+      starry_matrix: ${{ steps.matrix.outputs.starry_matrix }}
+      skip_all: ${{ steps.matrix.outputs.skip_all }}
+      selection_mode: ${{ steps.matrix.outputs.selection_mode }}
+      requested_targets: ${{ steps.matrix.outputs.requested_targets }}
+      axvisor_count: ${{ steps.matrix.outputs.axvisor_count }}
+      starry_count: ${{ steps.matrix.outputs.starry_count }}
+    steps:
+      - name: Build dynamic matrix from test_targets input
+        id: matrix
+        run: |
+          INPUT="${{ inputs.test_targets }}"
+          TARGETS_JSON=$(printf '%s' "$INPUT" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+
+          AXVISOR_ALL='[
+            {"type":"qemu","arch":"aarch64","vmconfigs":"configs/vms/arceos-aarch64-qemu-smp1.toml","vmconfigs_name":"ArceOS","vmimage_name":"qemu_aarch64_arceos","target_key":"axvisor-qemu-aarch64-arceos"},
+            {"type":"qemu","arch":"aarch64","vmconfigs":"configs/vms/linux-aarch64-qemu-smp1.toml","vmconfigs_name":"Linux","vmimage_name":"qemu_aarch64_linux","target_key":"axvisor-qemu-aarch64-linux"},
+            {"type":"qemu","arch":"x86_64","vmconfigs":"configs/vms/nimbos-x86_64-qemu-smp1.toml","vmconfigs_name":"NimbOS","vmimage_name":"qemu_x86_64_nimbos","target_key":"axvisor-qemu-x86_64-nimbos"},
+            {"type":"board","board":"phytiumpi","vmconfigs":"configs/vms/arceos-aarch64-e2000-smp1.toml","vmconfigs_name":"ArceOS","target_key":"axvisor-board-phytiumpi-arceos"},
+            {"type":"board","board":"phytiumpi","vmconfigs":"configs/vms/linux-aarch64-e2000-smp1.toml","vmconfigs_name":"Linux","target_key":"axvisor-board-phytiumpi-linux"},
+            {"type":"board","board":"roc-rk3568-pc","vmconfigs":"configs/vms/arceos-aarch64-rk3568-smp1.toml","vmconfigs_name":"ArceOS","target_key":"axvisor-board-roc-rk3568-pc-arceos"},
+            {"type":"board","board":"roc-rk3568-pc","vmconfigs":"configs/vms/linux-aarch64-rk3568-smp1.toml","vmconfigs_name":"Linux","target_key":"axvisor-board-roc-rk3568-pc-linux"}
+          ]'
+
+          STARRY_ALL='[
+            {"arch":"riscv64","target_key":"starry-riscv64"},
+            {"arch":"loongarch64","target_key":"starry-loongarch64"},
+            {"arch":"aarch64","target_key":"starry-aarch64"},
+            {"arch":"x86_64","target_key":"starry-x86_64"}
+          ]'
+
+          AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --argjson targets "$TARGETS_JSON" '
+            if (($targets | length) == 0) or (($targets | index("all")) != null) or (($targets | index("axvisor")) != null)
+            then map(del(.target_key))
+            else map(select(($targets | index(.target_key)) != null)) | map(del(.target_key))
+            end
+          ')
+
+          STARRY_MATRIX=$(echo "$STARRY_ALL" | jq -c --argjson targets "$TARGETS_JSON" '
+            if (($targets | length) == 0) or (($targets | index("all")) != null) or (($targets | index("starry")) != null)
+            then map(del(.target_key))
+            else map(select(($targets | index(.target_key)) != null)) | map(del(.target_key))
+            end
+          ')
+
+          SKIP_ALL=false
+          if [ "$AXVISOR_MATRIX" = "[]" ] && [ "$STARRY_MATRIX" = "[]" ]; then
+            SKIP_ALL=true
+          fi
+
+          SELECTION_MODE="subset"
+          if [ "$(echo "$TARGETS_JSON" | jq 'length')" -eq 0 ] || [ "$(echo "$TARGETS_JSON" | jq 'index("all") != null')" = "true" ]; then
+            SELECTION_MODE="all"
+          elif [ "$SKIP_ALL" = "true" ]; then
+            SELECTION_MODE="skip"
+          fi
+
+          AXVISOR_COUNT=$(echo "$AXVISOR_MATRIX" | jq 'length')
+          STARRY_COUNT=$(echo "$STARRY_MATRIX" | jq 'length')
+
+          echo "axvisor_matrix=$AXVISOR_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "starry_matrix=$STARRY_MATRIX" >> "$GITHUB_OUTPUT"
+          echo "skip_all=$SKIP_ALL" >> "$GITHUB_OUTPUT"
+          echo "selection_mode=$SELECTION_MODE" >> "$GITHUB_OUTPUT"
+          echo "requested_targets=$INPUT" >> "$GITHUB_OUTPUT"
+          echo "axvisor_count=$AXVISOR_COUNT" >> "$GITHUB_OUTPUT"
+          echo "starry_count=$STARRY_COUNT" >> "$GITHUB_OUTPUT"
+
+          echo "Input test_targets: $INPUT"
+          echo "AXVISOR_MATRIX: $AXVISOR_MATRIX"
+          echo "STARRY_MATRIX: $STARRY_MATRIX"
+
+      - name: Write detect summary
+        run: |
+          {
+            echo "## Dependency-aware Selection"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| requested_targets | \`${{ steps.matrix.outputs.requested_targets }}\` |"
+            echo "| selection_mode | \`${{ steps.matrix.outputs.selection_mode }}\` |"
+            echo "| skip_all | \`${{ steps.matrix.outputs.skip_all }}\` |"
+            echo "| axvisor_count | \`${{ steps.matrix.outputs.axvisor_count }}\` |"
+            echo "| starry_count | \`${{ steps.matrix.outputs.starry_count }}\` |"
+            echo ""
+            echo "### Axvisor Matrix"
+            echo "\`\`\`json"
+            echo '${{ steps.matrix.outputs.axvisor_matrix }}' | jq .
+            echo "\`\`\`"
+            echo ""
+            echo "### Starry Matrix"
+            echo "\`\`\`json"
+            echo '${{ steps.matrix.outputs.starry_matrix }}' | jq .
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ========== Axvisor Tests ==========
   axvisor:
+    needs: detect
+    if: needs.detect.outputs.skip_all != 'true' && needs.detect.outputs.axvisor_matrix != '[]'
     name: "Axvisor: ${{ matrix.type }} - ${{ matrix.vmconfigs_name }}"
     strategy:
-      matrix:
-        include:
-          # QEMU tests
-          - type: qemu
-            arch: aarch64
-            vmconfigs: configs/vms/arceos-aarch64-qemu-smp1.toml
-            vmconfigs_name: ArceOS
-            vmimage_name: qemu_aarch64_arceos
-          - type: qemu
-            arch: aarch64
-            vmconfigs: configs/vms/linux-aarch64-qemu-smp1.toml
-            vmconfigs_name: Linux
-            vmimage_name: qemu_aarch64_linux
-          - type: qemu
-            arch: x86_64
-            vmconfigs: configs/vms/nimbos-x86_64-qemu-smp1.toml
-            vmconfigs_name: NimbOS
-            vmimage_name: qemu_x86_64_nimbos
-          # Board tests
-          - type: board
-            board: phytiumpi
-            vmconfigs: configs/vms/arceos-aarch64-e2000-smp1.toml
-            vmconfigs_name: ArceOS
-          - type: board
-            board: phytiumpi
-            vmconfigs: configs/vms/linux-aarch64-e2000-smp1.toml
-            vmconfigs_name: Linux
-          - type: board
-            board: roc-rk3568-pc
-            vmconfigs: configs/vms/arceos-aarch64-rk3568-smp1.toml
-            vmconfigs_name: ArceOS
-          - type: board
-            board: roc-rk3568-pc
-            vmconfigs: configs/vms/linux-aarch64-rk3568-smp1.toml
-            vmconfigs_name: Linux
       fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect.outputs.axvisor_matrix) }}
     runs-on:
       - self-hosted
       - linux
       - ${{ matrix.type == 'qemu' && 'intel' || matrix.board }}
 
     steps:
-      - name: Filter test targets
-        id: filter
-        run: |
-          INPUT="${{ inputs.test_targets }}"
-          if [ "$INPUT" = "all" ] || [ -z "$INPUT" ] || echo ",$INPUT," | grep -q ",axvisor,"; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_run=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Clean up workspace
-        if: steps.filter.outputs.should_run == 'true'
         run: |
           [ -d .git ] && git submodule deinit -f . || true
           [ -d .git/modules ] && rm -rf .git/modules || true
           [ -d .git ] && git clean -ffdx || true
 
       - name: Checkout component
-        if: steps.filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           path: component
 
       - name: Checkout axvisor
-        if: steps.filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           repository: arceos-hypervisor/axvisor
@@ -108,24 +164,21 @@ jobs:
           submodules: recursive
 
       - name: Get component crate name
-        if: steps.filter.outputs.should_run == 'true'
         id: component
         working-directory: component
         run: |
           if [ -n "${{ inputs.crate_name }}" ]; then
             CRATE_NAME="${{ inputs.crate_name }}"
           else
-            CRATE_NAME=$(cargo tree 2>/dev/null | head -1 | cut -d' ' -f1 || basename $(pwd))
+            CRATE_NAME=$(cargo tree 2>/dev/null | head -1 | cut -d' ' -f1 || basename "$(pwd)")
           fi
-          echo "crate_name=$CRATE_NAME" >> $GITHUB_OUTPUT
+          echo "crate_name=$CRATE_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Apply patch to Cargo.toml
-        if: steps.filter.outputs.should_run == 'true'
         working-directory: axvisor
         run: |
           CRATE_NAME="${{ steps.component.outputs.crate_name }}"
           PATCH_LINE="$CRATE_NAME = { path = \"../component\" }"
-          # Check if [patch.crates-io] already exists
           if grep -q '^\[patch.crates-io\]' Cargo.toml; then
             sed -i "/^\[patch.crates-io\]/a $PATCH_LINE" Cargo.toml
           else
@@ -137,16 +190,12 @@ jobs:
           tail -10 Cargo.toml
 
       - name: Install dependencies
-        if: steps.filter.outputs.should_run == 'true'
         run: cargo +stable install ostool --version ^0.8
 
       - name: Download images and patch vm configs (QEMU only)
-        if: steps.filter.outputs.should_run == 'true' && matrix.type == 'qemu'
+        if: matrix.type == 'qemu'
         working-directory: axvisor
         run: |
-          ls -lha .
-          ls -lha modules/
-
           IMAGE_DIR="/tmp/.axvisor-images"
           IFS=',' read -ra CONFIGS <<< "${{ matrix.vmconfigs }}"
           IFS=',' read -ra IMAGES <<< "${{ matrix.vmimage_name }}"
@@ -155,7 +204,7 @@ jobs:
             img=$(echo "$img" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             config="${CONFIGS[$i]}"
             config=$(echo "$config" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            cargo xtask image download $img
+            cargo xtask image download "$img"
             img_name="qemu-${{ matrix.arch }}"
             image_location=$(sed -n 's/^image_location[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config")
 
@@ -174,22 +223,17 @@ jobs:
             esac
 
             ROOTFS_IMG_PATH="${IMAGE_DIR}/$img/rootfs.img"
-
             if [ -f "${ROOTFS_IMG_PATH}" ]; then
-              echo "Found rootfs.img, patching qemu-${{ matrix.arch }}.toml file..."
               sed -i 's|file=${workspaceFolder}/tmp/rootfs.img|file='"${ROOTFS_IMG_PATH}"'|' ".github/workflows/qemu-${{ matrix.arch }}.toml"
-              echo "Rootfs setup completed"
             else
-              echo "No rootfs.img found, removing rootfs device configuration from qemu-${{ matrix.arch }}.toml..."
               sed -i '/-device/,/virtio-blk-device,drive=disk0/d' ".github/workflows/qemu-${{ matrix.arch }}.toml"
               sed -i '/-drive/,/id=disk0,if=none,format=raw,file=${workspaceFolder}\/tmp\/rootfs.img/d' ".github/workflows/qemu-${{ matrix.arch }}.toml"
               sed -i 's/root=\/dev\/vda rw //' ".github/workflows/qemu-${{ matrix.arch }}.toml"
-              echo "Rootfs device configuration removed"
             fi
           done
 
       - name: Run QEMU tests
-        if: steps.filter.outputs.should_run == 'true' && matrix.type == 'qemu'
+        if: matrix.type == 'qemu'
         working-directory: axvisor
         run: |
           export RUST_LOG=debug
@@ -199,10 +243,9 @@ jobs:
             --vmconfigs ${{ matrix.vmconfigs }}
 
       - name: Run Board tests
-        if: steps.filter.outputs.should_run == 'true' && matrix.type == 'board'
+        if: matrix.type == 'board'
         working-directory: axvisor
         run: |
-          echo $BOARD_POWER_RESET
           export RUST_LOG=debug
           cargo xtask uboot \
             --build-config configs/board/${{ matrix.board }}.toml \
@@ -210,43 +253,24 @@ jobs:
             --vmconfigs ${{ matrix.vmconfigs }} \
             --bin-dir /home/runner/tftp
 
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.filter.outputs.should_run }}" = "true" ]; then
-            echo "✅ Axvisor test completed"
-          else
-            echo "⏭️ Axvisor test skipped"
-          fi
-
   # ========== Starry Tests ==========
   starry:
+    needs: detect
+    if: needs.detect.outputs.skip_all != 'true' && needs.detect.outputs.starry_matrix != '[]'
     name: "Starry: ${{ matrix.arch }}"
     strategy:
       fail-fast: false
       matrix:
-        arch: [riscv64, loongarch64, aarch64, x86_64]
+        include: ${{ fromJson(needs.detect.outputs.starry_matrix) }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Filter test targets
-        id: filter
-        run: |
-          INPUT="${{ inputs.test_targets }}"
-          if [ "$INPUT" = "all" ] || [ -z "$INPUT" ] || echo ",$INPUT," | grep -q ",starry,"; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_run=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Checkout component
-        if: steps.filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           path: component
 
       - name: Checkout StarryOS
-        if: steps.filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           repository: Starry-OS/StarryOS
@@ -255,24 +279,21 @@ jobs:
           submodules: recursive
 
       - name: Get component crate name
-        if: steps.filter.outputs.should_run == 'true'
         id: component
         working-directory: component
         run: |
           if [ -n "${{ inputs.crate_name }}" ]; then
             CRATE_NAME="${{ inputs.crate_name }}"
           else
-            CRATE_NAME=$(cargo tree 2>/dev/null | head -1 | cut -d' ' -f1 || basename $(pwd))
+            CRATE_NAME=$(cargo tree 2>/dev/null | head -1 | cut -d' ' -f1 || basename "$(pwd)")
           fi
-          echo "crate_name=$CRATE_NAME" >> $GITHUB_OUTPUT
+          echo "crate_name=$CRATE_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Apply patch to Cargo.toml
-        if: steps.filter.outputs.should_run == 'true'
         working-directory: starry
         run: |
           CRATE_NAME="${{ steps.component.outputs.crate_name }}"
           PATCH_LINE="$CRATE_NAME = { path = \"../component\" }"
-          # Check if [patch.crates-io] already exists
           if grep -q '^\[patch.crates-io\]' Cargo.toml; then
             sed -i "/^\[patch.crates-io\]/a $PATCH_LINE" Cargo.toml
           else
@@ -284,43 +305,28 @@ jobs:
           tail -10 Cargo.toml
 
       - uses: Swatinem/rust-cache@v2
-        if: steps.filter.outputs.should_run == 'true'
         with:
           shared-key: test
           cache-targets: false
 
       - uses: arceos-org/setup-musl@v1
-        if: steps.filter.outputs.should_run == 'true'
         with:
           arch: ${{ matrix.arch }}
 
       - name: Build
-        if: steps.filter.outputs.should_run == 'true'
         working-directory: starry
         run: make ARCH=${{ matrix.arch }} build
 
       - name: Setup QEMU
-        if: steps.filter.outputs.should_run == 'true'
         uses: arceos-org/setup-qemu@v1
         with:
           version: 10.1.0
           arch_list: ${{ matrix.arch }}
 
       - name: Prepare rootfs
-        if: steps.filter.outputs.should_run == 'true'
         working-directory: starry
         run: make ARCH=${{ matrix.arch }} img
 
       - name: Test
-        if: steps.filter.outputs.should_run == 'true'
         working-directory: starry
         run: scripts/ci-test.py ${{ matrix.arch }}
-
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.filter.outputs.should_run }}" = "true" ]; then
-            echo "✅ Starry test completed"
-          else
-            echo "⏭️ Starry test skipped"
-          fi

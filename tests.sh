@@ -26,6 +26,9 @@ FRAMEWORK_DIR="$SCRIPT_DIR"
 COMPONENT_DIR=""
 CONFIG_FILE=""
 TEST_TARGET="all"
+AUTO_TARGET=false
+BASE_REF="origin/main"
+AUTO_DETECTED_TARGETS=""
 VERBOSE=false
 CLEANUP=true
 DRY_RUN=false
@@ -53,6 +56,8 @@ Hypervisor Test Framework - 本地测试脚本
   --no-cleanup               不清理临时文件
   --dry-run                  仅显示将要执行的命令
   --sequential               顺序执行测试 (不并行)
+  --auto-target              根据 git 变更自动选择测试目标
+  --base-ref REF             自动选择目标时用于对比的基线 (默认: origin/main)
   -h, --help                 显示此帮助
 
 测试目标:
@@ -83,6 +88,7 @@ Hypervisor Test Framework - 本地测试脚本
   tests.sh -t starry-aarch64                  # 仅运行 starry aarch64 测试
   tests.sh -t axvisor-board-phytiumpi-arceos  # 仅运行 phytiumpi ArceOS 测试
   tests.sh --dry-run -v                       # 显示将要执行的命令
+  tests.sh --auto-target --base-ref origin/main
 
 EOF
 }
@@ -122,6 +128,14 @@ parse_args() {
             --sequential)
                 PARALLEL=false
                 shift
+                ;;
+            --auto-target)
+                AUTO_TARGET=true
+                shift
+                ;;
+            --base-ref)
+                BASE_REF="$2"
+                shift 2
                 ;;
             -h|--help)
                 show_help
@@ -558,11 +572,151 @@ set_target_result() {
     write_target_meta "$meta_file" "$dep_state" "$kvm_state" "$retry_count" "$fallback_used"
 }
 
+# 判断是否为非代码文件（用于自动目标选择）
+is_non_code_file() {
+    local path="$1"
+    [[ "$path" == doc/* ]] && return 0
+    [[ "$path" == *.md || "$path" == *.txt || "$path" == *.png || "$path" == *.jpg || "$path" == *.jpeg || "$path" == *.svg || "$path" == *.gif ]] && return 0
+    [[ "$path" == "LICENSE" || "$path" == ".gitignore" || "$path" == ".gitattributes" ]] && return 0
+    return 1
+}
+
+# 获取变更文件列表（自动目标选择）
+get_changed_files_for_auto_target() {
+    local files=""
+    if files=$(git diff --name-only "$BASE_REF" 2>/dev/null); then
+        printf '%s\n' "$files"
+        return 0
+    fi
+
+    log_warn "自动目标选择: base-ref '$BASE_REF' 不可用，回退到 HEAD~1"
+    if files=$(git diff --name-only HEAD~1 2>/dev/null); then
+        printf '%s\n' "$files"
+        return 0
+    fi
+    return 1
+}
+
+# 根据变更路径自动选择测试目标
+auto_detect_test_targets() {
+    local changed_files
+    changed_files="$(get_changed_files_for_auto_target)" || {
+        log_warn "自动目标选择失败，回退为 all"
+        TEST_TARGET="all"
+        return
+    }
+
+    local changed_count=0
+    local rule_hits=()
+    while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        changed_count=$((changed_count + 1))
+    done <<< "$changed_files"
+
+    log "自动目标选择: base_ref=$BASE_REF, changed_files=$changed_count"
+    if [[ "$VERBOSE" == true ]]; then
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            log_debug "  changed: $f"
+        done <<< "$changed_files"
+    fi
+
+    # 无变更时直接跳过
+    if [ -z "$changed_files" ]; then
+        rule_hits+=("no_changes")
+        log "自动目标选择: 未检测到变更，跳过所有测试"
+        TEST_TARGET="__skip_all__"
+        AUTO_DETECTED_TARGETS=""
+        log_debug "  rules: ${rule_hits[*]}"
+        return
+    fi
+
+    local has_code_change=false
+    local needs_all=false
+    local need_qemu_aarch64=false
+    local need_qemu_x86_64=false
+    local need_board_phytium=false
+    local need_board_rk3568=false
+    local f
+
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        if ! is_non_code_file "$f"; then
+            has_code_change=true
+        fi
+
+        case "$f" in
+            Cargo.toml|Cargo.lock|rust-toolchain.toml|tests.sh|check.sh|.github/workflows/*)
+                needs_all=true
+                rule_hits+=("global_or_ci_config:$f")
+                ;;
+            kernel/src/hal/arch/aarch64/*|configs/board/qemu-aarch64.toml|configs/vms/*aarch64*)
+                need_qemu_aarch64=true
+                rule_hits+=("aarch64_path:$f")
+                ;;
+            kernel/src/hal/arch/x86_64/*|platform/x86-qemu-q35/*|configs/board/qemu-x86_64.toml|configs/vms/*x86_64*)
+                need_qemu_x86_64=true
+                rule_hits+=("x86_64_path:$f")
+                ;;
+        esac
+
+        if [[ "$f" == *phytium* || "$f" == *e2000* ]]; then
+            need_board_phytium=true
+            rule_hits+=("phytium_path:$f")
+        fi
+        if [[ "$f" == *rk3568* || "$f" == *rockchip* ]]; then
+            need_board_rk3568=true
+            rule_hits+=("rk3568_path:$f")
+        fi
+    done <<< "$changed_files"
+
+    if [ "$has_code_change" = false ]; then
+        rule_hits+=("non_code_only")
+        log "自动目标选择: 仅文档/非代码变更，跳过所有测试"
+        TEST_TARGET="__skip_all__"
+        AUTO_DETECTED_TARGETS=""
+        log_debug "  rules: ${rule_hits[*]}"
+        return
+    fi
+
+    if [ "$needs_all" = true ]; then
+        TEST_TARGET="all"
+        log "自动目标选择: 命中全量规则，运行 all"
+        log_debug "  rules: ${rule_hits[*]}"
+        return
+    fi
+
+    local targets=()
+    [ "$need_qemu_aarch64" = true ] && targets+=("axvisor-qemu-aarch64-arceos" "axvisor-qemu-aarch64-linux")
+    [ "$need_qemu_x86_64" = true ] && targets+=("axvisor-qemu-x86_64-nimbos")
+    [ "$need_board_phytium" = true ] && targets+=("axvisor-board-phytiumpi-arceos" "axvisor-board-phytiumpi-linux")
+    [ "$need_board_rk3568" = true ] && targets+=("axvisor-board-roc-rk3568-pc-arceos" "axvisor-board-roc-rk3568-pc-linux")
+
+    if [ ${#targets[@]} -eq 0 ]; then
+        # 保守回退，避免漏测
+        TEST_TARGET="all"
+        log_warn "自动目标选择: 无法精确匹配，保守回退 all"
+        log_debug "  rules: ${rule_hits[*]}"
+        return
+    fi
+
+    TEST_TARGET="__auto__"
+    AUTO_DETECTED_TARGETS="${targets[*]}"
+    log "自动目标选择: ${AUTO_DETECTED_TARGETS}"
+    log_debug "  rules: ${rule_hits[*]}"
+}
+
 # 获取要测试的目标
 get_test_targets() {
     local targets=()
-    
-    if [ "$TEST_TARGET" == "all" ]; then
+
+    if [ "$TEST_TARGET" == "__skip_all__" ]; then
+        echo ""
+        return
+    elif [ "$TEST_TARGET" == "__auto__" ]; then
+        echo "$AUTO_DETECTED_TARGETS"
+        return
+    elif [ "$TEST_TARGET" == "all" ]; then
         # 从配置获取所有目标
         local count=$(echo "$CONFIG" | jq '.test_targets | length')
         for ((i=0; i<count; i++)); do
@@ -1194,10 +1348,22 @@ run_all_tests() {
         
         # 等待所有任务完成
         for i in "${!pids[@]}"; do
-            if ! wait ${pids[$i]}; then
-                ((failed++))
+            local target="${target_array[$i]}"
+            local status_file="$OUTPUT_DIR/${target}.status"
+            wait ${pids[$i]} || true
+
+            if [ -f "$status_file" ]; then
+                local status=$(cat "$status_file")
+                if [ "$status" == "passed" ]; then
+                    ((passed++))
+                elif [ "$status" == "skipped" ]; then
+                    ((skipped++))
+                else
+                    ((failed++))
+                fi
             else
-                ((passed++))
+                # 未生成状态文件时按失败处理
+                ((failed++))
             fi
         done
     else
@@ -1312,6 +1478,10 @@ main() {
     
     check_dependencies
     load_config
+
+    if [ "$AUTO_TARGET" == true ]; then
+        auto_detect_test_targets
+    fi
     
     log "配置加载完成"
     log "组件: $COMPONENT_NAME ($COMPONENT_CRATE)"
