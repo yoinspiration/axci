@@ -38,6 +38,8 @@ IMAGE_STORAGE_ROOT="/tmp/.axvisor-images"
 DEFAULT_REGISTRY_URL="https://raw.githubusercontent.com/arceos-hypervisor/axvisor-guest/refs/heads/main/registry/default.toml"
 FALLBACK_REGISTRY_URL="https://raw.githubusercontent.com/arceos-hypervisor/axvisor-guest/refs/heads/main/registry/v0.0.22.toml"
 IMAGE_DOWNLOAD_MAX_ATTEMPTS=2
+TEST_TARGET_RULES_FILE="$FRAMEWORK_DIR/configs/test-target-rules.json"
+TARGET_RULES_JSON=""
 
 # 帮助信息
 show_help() {
@@ -572,13 +574,46 @@ set_target_result() {
     write_target_meta "$meta_file" "$dep_state" "$kvm_state" "$retry_count" "$fallback_used"
 }
 
+# 加载自动目标选择规则
+load_test_target_rules() {
+    if [ -n "$TARGET_RULES_JSON" ]; then
+        return 0
+    fi
+
+    if [ ! -f "$TEST_TARGET_RULES_FILE" ]; then
+        log_warn "自动目标选择规则文件不存在: $TEST_TARGET_RULES_FILE，回退为 all"
+        return 1
+    fi
+
+    if ! jq -e '
+        .non_code and
+        .non_code.dirs and
+        .non_code.exts and
+        .non_code.files and
+        .run_all_patterns and
+        .selection_rules and
+        .target_order
+    ' "$TEST_TARGET_RULES_FILE" > /dev/null 2>&1; then
+        log_warn "自动目标选择规则文件格式无效: $TEST_TARGET_RULES_FILE，回退为 all"
+        return 1
+    fi
+
+    TARGET_RULES_JSON="$(jq -c . "$TEST_TARGET_RULES_FILE")"
+    return 0
+}
+
 # 判断是否为非代码文件（用于自动目标选择）
 is_non_code_file() {
     local path="$1"
-    [[ "$path" == doc/* ]] && return 0
-    [[ "$path" == *.md || "$path" == *.txt || "$path" == *.png || "$path" == *.jpg || "$path" == *.jpeg || "$path" == *.svg || "$path" == *.gif ]] && return 0
-    [[ "$path" == "LICENSE" || "$path" == ".gitignore" || "$path" == ".gitattributes" ]] && return 0
-    return 1
+    if [ -z "$TARGET_RULES_JSON" ]; then
+        return 1
+    fi
+
+    echo "$TARGET_RULES_JSON" | jq -e --arg path "$path" '
+        (.non_code.dirs  | any(. as $d | $path | startswith($d))) or
+        (.non_code.exts  | any(. as $e | $path | endswith($e))) or
+        (.non_code.files | any(. as $f | $path == $f))
+    ' > /dev/null 2>&1
 }
 
 # 获取变更文件列表（自动目标选择）
@@ -599,6 +634,12 @@ get_changed_files_for_auto_target() {
 
 # 根据变更路径自动选择测试目标
 auto_detect_test_targets() {
+    load_test_target_rules || {
+        TEST_TARGET="all"
+        AUTO_DETECTED_TARGETS=""
+        return
+    }
+
     local changed_files
     changed_files="$(get_changed_files_for_auto_target)" || {
         log_warn "自动目标选择失败，回退为 all"
@@ -633,11 +674,24 @@ auto_detect_test_targets() {
 
     local has_code_change=false
     local needs_all=false
-    local need_qemu_aarch64=false
-    local need_qemu_x86_64=false
-    local need_board_phytium=false
-    local need_board_rk3568=false
+    local -A selected_target_map=()
+    local run_all_pattern=""
     local f
+    local rule_line
+    local rule_id
+    local patterns_blob
+    local targets_blob
+    local pattern
+    local target_name
+
+    local run_all_patterns=()
+    mapfile -t run_all_patterns < <(echo "$TARGET_RULES_JSON" | jq -r '.run_all_patterns[]')
+
+    local selection_rule_rows=()
+    mapfile -t selection_rule_rows < <(echo "$TARGET_RULES_JSON" | jq -r '.selection_rules[] | [.id, (.patterns | join("\u001f")), (.targets | join("\u001f"))] | @tsv')
+
+    local target_order=()
+    mapfile -t target_order < <(echo "$TARGET_RULES_JSON" | jq -r '.target_order[]')
 
     while IFS= read -r f; do
         [ -z "$f" ] && continue
@@ -645,29 +699,34 @@ auto_detect_test_targets() {
             has_code_change=true
         fi
 
-        case "$f" in
-            Cargo.toml|Cargo.lock|rust-toolchain.toml|tests.sh|check.sh|.github/workflows/*)
+        for run_all_pattern in "${run_all_patterns[@]}"; do
+            if [[ "$f" == $run_all_pattern ]]; then
                 needs_all=true
-                rule_hits+=("global_or_ci_config:$f")
-                ;;
-            kernel/src/hal/arch/aarch64/*|configs/board/qemu-aarch64.toml|configs/vms/*aarch64*)
-                need_qemu_aarch64=true
-                rule_hits+=("aarch64_path:$f")
-                ;;
-            kernel/src/hal/arch/x86_64/*|platform/x86-qemu-q35/*|configs/board/qemu-x86_64.toml|configs/vms/*x86_64*)
-                need_qemu_x86_64=true
-                rule_hits+=("x86_64_path:$f")
-                ;;
-        esac
+                rule_hits+=("run_all:$f")
+                break
+            fi
+        done
 
-        if [[ "$f" == *phytium* || "$f" == *e2000* ]]; then
-            need_board_phytium=true
-            rule_hits+=("phytium_path:$f")
-        fi
-        if [[ "$f" == *rk3568* || "$f" == *rockchip* ]]; then
-            need_board_rk3568=true
-            rule_hits+=("rk3568_path:$f")
-        fi
+        for rule_line in "${selection_rule_rows[@]}"; do
+            IFS=$'\t' read -r rule_id patterns_blob targets_blob <<< "$rule_line"
+            local matched=false
+            local patterns=()
+            IFS=$'\x1f' read -r -a patterns <<< "$patterns_blob"
+            for pattern in "${patterns[@]}"; do
+                if [[ "$f" == $pattern ]]; then
+                    matched=true
+                    break
+                fi
+            done
+            if [ "$matched" = true ]; then
+                rule_hits+=("$rule_id:$f")
+                local targets=()
+                IFS=$'\x1f' read -r -a targets <<< "$targets_blob"
+                for target_name in "${targets[@]}"; do
+                    selected_target_map["$target_name"]=1
+                done
+            fi
+        done
     done <<< "$changed_files"
 
     if [ "$has_code_change" = false ]; then
@@ -687,10 +746,11 @@ auto_detect_test_targets() {
     fi
 
     local targets=()
-    [ "$need_qemu_aarch64" = true ] && targets+=("axvisor-qemu-aarch64-arceos" "axvisor-qemu-aarch64-linux")
-    [ "$need_qemu_x86_64" = true ] && targets+=("axvisor-qemu-x86_64-nimbos")
-    [ "$need_board_phytium" = true ] && targets+=("axvisor-board-phytiumpi-arceos" "axvisor-board-phytiumpi-linux")
-    [ "$need_board_rk3568" = true ] && targets+=("axvisor-board-roc-rk3568-pc-arceos" "axvisor-board-roc-rk3568-pc-linux")
+    for target_name in "${target_order[@]}"; do
+        if [ -n "${selected_target_map[$target_name]:-}" ]; then
+            targets+=("$target_name")
+        fi
+    done
 
     if [ ${#targets[@]} -eq 0 ]; then
         # 保守回退，避免漏测

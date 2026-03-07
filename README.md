@@ -29,6 +29,9 @@ axci/
 │       ├── verify-tag.yml   # 标签验证
 │       ├── deploy.yml       # 文档部署
 │       └── release.yml      # 发布
+├── configs/
+│   └── test-target-rules.json # auto-target 路径规则
+├── tests.sh                  # 本地测试入口
 └── README.md
 ```
 
@@ -262,44 +265,42 @@ git push origin v1.0.0-pre.1
 ### 设计
 
 `test.yml` 工作流运行集成测试，通过 patch 方式将组件集成到测试目标中构建验证。
+本仓库同时提供 `tests.sh` 本地脚本用于同逻辑验证，支持 `--auto-target` 按变更自动选取目标。
 
 **执行过程：**
 
 ```mermaid
 flowchart TB
-    A[prepare job] --> B[Set matrix]
-    B --> C[test job - matrix]
-    C --> D[Filter targets]
-    D --> E{should_run?}
-    E -->|true| F[Checkout component]
-    E -->|false| X[跳过]
-    F --> G[Checkout test target]
-    G --> H[Get crate name]
-    H --> I[Apply patch]
-    I --> J[Setup Rust]
-    J --> K[Build]
+    A[detect job] --> B[Build dynamic matrix]
+    B --> C{skip_all?}
+    C -->|true| X[跳过测试]
+    C -->|false| D[axvisor/starry matrix jobs]
+    D --> E[Checkout component]
+    E --> F[Checkout test target]
+    F --> G[Apply patch]
+    G --> H[Run test]
 ```
 
 **详细步骤：**
 
-1. **prepare job** - 准备测试矩阵
-   - 输出默认测试目标配置（axvisor, starry）
-2. **test job** - 并行执行测试（每个 target 一个 job）
-   - Filter test targets - 根据 `test_targets` 输入过滤
+1. **detect job** - 动态生成测试矩阵
+   - 根据 `test_targets` 输入构造 `axvisor_matrix` 与 `starry_matrix`
+   - 输出 `skip_all` 与决策摘要
+2. **test jobs** - 并行执行测试（每个 target 一个 job）
    - Checkout component - 检出被测组件到 `component/`
    - Checkout test target - 检出测试目标仓库到 `test-target/`
    - Get component crate name - 从 Cargo.toml 检测或使用输入值
-   - Apply patch to Cargo.toml - 添加 `[patch.crates-io]` 覆盖依赖
-   - Setup Rust - 安装 nightly 工具链
-   - Build - 执行构建命令（带超时控制）
+    - Apply patch to Cargo.toml - 添加 `[patch.crates-io]` 覆盖依赖
+    - Build/Test - 执行目标测试命令
 
 **输入参数：**
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `crate_name` | 组件 crate 名称 | 自动检测 |
-| `test_targets` | 测试目标（逗号分隔或 "all"） | all |
-| `skip_build` | 跳过构建 | false |
+| `test_targets` | 测试目标（逗号分隔、`all` 或 `auto`） | all |
+| `base_ref` | `test_targets=auto` 时用于 `git diff` 的基线 | origin/main |
+| `skip_build` | 跳过构建（当前未启用） | false |
 
 **默认测试目标：**
 - `axvisor` - https://github.com/arceos-hypervisor/axvisor
@@ -334,6 +335,40 @@ jobs:
       crate_name: 'arm_vcpu'
       test_targets: 'axvisor'
 ```
+
+**自动选择（CI detect 读取规则文件）：**
+
+```yaml
+jobs:
+  test:
+    uses: arceos-hypervisor/axci/.github/workflows/test.yml@main
+    with:
+      test_targets: 'auto'
+      base_ref: 'origin/main'
+```
+
+### 本地自动目标选择（`tests.sh`）
+
+`tests.sh` 支持在本地按变更路径自动选择测试目标：
+
+```bash
+bash tests.sh --auto-target --base-ref origin/main --dry-run -v
+```
+
+规则定义已外置到 `configs/test-target-rules.json`，脚本仅负责解释执行。
+
+**规则文件字段：**
+
+| 字段 | 说明 |
+|------|------|
+| `non_code` | 非代码文件判定（目录/后缀/固定文件） |
+| `run_all_patterns` | 命中后直接全量测试 |
+| `selection_rules` | 路径模式到目标列表的映射规则 |
+| `target_order` | 自动选择结果输出顺序 |
+
+**维护建议：**
+- 调整路径匹配优先修改 `configs/test-target-rules.json`，避免改动脚本逻辑。
+- 新增目标时同步更新 `selection_rules` 与 `target_order`。
 
 ## 附录：verify-tag.yml
 

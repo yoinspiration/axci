@@ -27,6 +27,11 @@ on:
         required: false
         default: 'all'
         type: string
+      base_ref:
+        description: 'Base ref for auto target detection'
+        required: false
+        default: 'origin/main'
+        type: string
 
 jobs:
   detect:
@@ -48,11 +53,146 @@ jobs:
           git config --global http.lowSpeedTime 60
           git config --global http.postBuffer 104857600
 
+      - name: Checkout component repository
+        uses: actions/checkout@v4
+        timeout-minutes: 10
+        with:
+          fetch-depth: 0
+          path: component
+
+      - name: Resolve axci workflow ref
+        id: axci_ref
+        run: |
+          REF_PART="${{ github.workflow_ref }}"
+          REF_PART="${REF_PART##*@}"
+          echo "ref=$REF_PART" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout axci rules
+        uses: actions/checkout@v4
+        timeout-minutes: 10
+        with:
+          repository: arceos-hypervisor/axci
+          ref: ${{ steps.axci_ref.outputs.ref }}
+          path: axci-rules
+
       - name: Build dynamic matrix from test_targets input
         id: matrix
+        working-directory: component
         run: |
           INPUT="${{ inputs.test_targets }}"
-          TARGETS_JSON=$(printf '%s' "$INPUT" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))')
+          BASE_REF="${{ inputs.base_ref }}"
+          RULES_FILE="../axci-rules/configs/test-target-rules.json"
+          TARGETS_JSON="[]"
+          AUTO_REASON="manual_input"
+
+          parse_targets_input() {
+            printf '%s' "$1" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))'
+          }
+
+          is_non_code_file() {
+            local path="$1"
+            jq -e --arg path "$path" '
+              (.non_code.dirs  | any(. as $d | $path | startswith($d))) or
+              (.non_code.exts  | any(. as $e | $path | endswith($e))) or
+              (.non_code.files | any(. as $f | $path == $f))
+            ' "$RULES_FILE" > /dev/null 2>&1
+          }
+
+          if [ "$INPUT" = "auto" ] || [ "$INPUT" = "__auto__" ]; then
+            if [ ! -f "$RULES_FILE" ]; then
+              echo "Rules file not found at $RULES_FILE, fallback to all"
+              TARGETS_JSON='["all"]'
+              AUTO_REASON="rules_missing_fallback_all"
+            else
+              if ! jq -e '
+                .non_code and
+                .run_all_patterns and
+                .selection_rules and
+                .target_order
+              ' "$RULES_FILE" > /dev/null 2>&1; then
+                echo "Rules file is invalid, fallback to all"
+                TARGETS_JSON='["all"]'
+                AUTO_REASON="rules_invalid_fallback_all"
+              else
+                CHANGED_FILES="$(git diff --name-only "$BASE_REF" 2>/dev/null || true)"
+                if [ -z "$CHANGED_FILES" ]; then
+                  echo "base_ref '$BASE_REF' unavailable or no diff, fallback to HEAD~1"
+                  CHANGED_FILES="$(git diff --name-only HEAD~1 2>/dev/null || true)"
+                fi
+
+                if [ -z "$CHANGED_FILES" ]; then
+                  TARGETS_JSON='[]'
+                  AUTO_REASON="no_changes_skip"
+                else
+                  mapfile -t RUN_ALL_PATTERNS < <(jq -r '.run_all_patterns[]' "$RULES_FILE")
+                  mapfile -t RULE_ROWS < <(jq -r '.selection_rules[] | [.id, (.patterns | join("\u001f")), (.targets | join("\u001f"))] | @tsv' "$RULES_FILE")
+                  mapfile -t TARGET_ORDER < <(jq -r '.target_order[]' "$RULES_FILE")
+
+                  HAS_CODE_CHANGE=false
+                  NEEDS_ALL=false
+                  declare -A SELECTED=()
+
+                  while IFS= read -r f; do
+                    [ -z "$f" ] && continue
+
+                    if ! is_non_code_file "$f"; then
+                      HAS_CODE_CHANGE=true
+                    fi
+
+                    for p in "${RUN_ALL_PATTERNS[@]}"; do
+                      if [[ "$f" == $p ]]; then
+                        NEEDS_ALL=true
+                        break
+                      fi
+                    done
+
+                    for row in "${RULE_ROWS[@]}"; do
+                      IFS=$'\t' read -r _rule_id patterns_blob targets_blob <<< "$row"
+                      matched=false
+                      IFS=$'\x1f' read -r -a patterns <<< "$patterns_blob"
+                      for p in "${patterns[@]}"; do
+                        if [[ "$f" == $p ]]; then
+                          matched=true
+                          break
+                        fi
+                      done
+                      if [ "$matched" = true ]; then
+                        IFS=$'\x1f' read -r -a targets <<< "$targets_blob"
+                        for t in "${targets[@]}"; do
+                          SELECTED["$t"]=1
+                        done
+                      fi
+                    done
+                  done <<< "$CHANGED_FILES"
+
+                  if [ "$HAS_CODE_CHANGE" = false ]; then
+                    TARGETS_JSON='[]'
+                    AUTO_REASON="non_code_only_skip"
+                  elif [ "$NEEDS_ALL" = true ]; then
+                    TARGETS_JSON='["all"]'
+                    AUTO_REASON="run_all_rule"
+                  else
+                    ORDERED_TARGETS=()
+                    for t in "${TARGET_ORDER[@]}"; do
+                      if [ -n "${SELECTED[$t]:-}" ]; then
+                        ORDERED_TARGETS+=("$t")
+                      fi
+                    done
+
+                    if [ ${#ORDERED_TARGETS[@]} -eq 0 ]; then
+                      TARGETS_JSON='["all"]'
+                      AUTO_REASON="no_match_fallback_all"
+                    else
+                      TARGETS_JSON=$(printf '%s\n' "${ORDERED_TARGETS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+                      AUTO_REASON="rule_selected"
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          else
+            TARGETS_JSON=$(parse_targets_input "$INPUT")
+          fi
 
           AXVISOR_ALL='[
             {"type":"qemu","arch":"aarch64","vmconfigs":"configs/vms/arceos-aarch64-qemu-smp1.toml","vmconfigs_name":"ArceOS","vmimage_name":"qemu_aarch64_arceos","target_key":"axvisor-qemu-aarch64-arceos"},
@@ -91,7 +231,15 @@ jobs:
           fi
 
           SELECTION_MODE="subset"
-          if [ "$(echo "$TARGETS_JSON" | jq 'length')" -eq 0 ] || [ "$(echo "$TARGETS_JSON" | jq 'index("all") != null')" = "true" ]; then
+          if [ "$INPUT" = "auto" ] || [ "$INPUT" = "__auto__" ]; then
+            if [ "$SKIP_ALL" = "true" ]; then
+              SELECTION_MODE="auto-skip"
+            elif [ "$(echo "$TARGETS_JSON" | jq 'index("all") != null')" = "true" ]; then
+              SELECTION_MODE="auto-all"
+            else
+              SELECTION_MODE="auto-subset"
+            fi
+          elif [ "$(echo "$TARGETS_JSON" | jq 'length')" -eq 0 ] || [ "$(echo "$TARGETS_JSON" | jq 'index("all") != null')" = "true" ]; then
             SELECTION_MODE="all"
           elif [ "$SKIP_ALL" = "true" ]; then
             SELECTION_MODE="skip"
@@ -109,6 +257,9 @@ jobs:
           echo "starry_count=$STARRY_COUNT" >> "$GITHUB_OUTPUT"
 
           echo "Input test_targets: $INPUT"
+          echo "Auto detect reason: $AUTO_REASON"
+          echo "Base ref: $BASE_REF"
+          echo "Targets json: $TARGETS_JSON"
           echo "AXVISOR_MATRIX: $AXVISOR_MATRIX"
           echo "STARRY_MATRIX: $STARRY_MATRIX"
 
