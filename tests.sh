@@ -31,6 +31,10 @@ CLEANUP=true
 DRY_RUN=false
 PARALLEL=true
 OUTPUT_DIR=""
+IMAGE_STORAGE_ROOT="/tmp/.axvisor-images"
+DEFAULT_REGISTRY_URL="https://raw.githubusercontent.com/arceos-hypervisor/axvisor-guest/refs/heads/main/registry/default.toml"
+FALLBACK_REGISTRY_URL="https://raw.githubusercontent.com/arceos-hypervisor/axvisor-guest/refs/heads/main/registry/v0.0.22.toml"
+IMAGE_DOWNLOAD_MAX_ATTEMPTS=2
 
 # 帮助信息
 show_help() {
@@ -174,6 +178,11 @@ check_dependencies() {
     # 检查 script（board 测试 PTY 依赖）
     if ! command -v script &> /dev/null; then
         missing+=("script (util-linux)")
+    fi
+
+    # 检查 curl（镜像 registry fallback 依赖）
+    if ! command -v curl &> /dev/null; then
+        missing+=("curl")
     fi
     
     if [ ${#missing[@]} -gt 0 ]; then
@@ -394,6 +403,161 @@ setup_output() {
     log_debug "输出目录: $OUTPUT_DIR"
 }
 
+# 初始化本地镜像 registry（当默认下载源异常时用于兜底）
+bootstrap_image_registry() {
+    local log_file="$1"
+    local storage_dir="${IMAGE_STORAGE_ROOT}"
+    local default_registry_url="${DEFAULT_REGISTRY_URL}"
+    local fallback_registry_url="${FALLBACK_REGISTRY_URL}"
+    local default_registry_file include_url source_url source_kind
+
+    mkdir -p "$storage_dir"
+    if [ -f "${storage_dir}/images.toml" ]; then
+        return 0
+    fi
+
+    default_registry_file="$(mktemp)"
+    if ! curl -4 --retry 3 --retry-delay 2 -fL "$default_registry_url" -o "$default_registry_file" >> "$log_file" 2>&1; then
+        rm -f "$default_registry_file"
+        source_kind="fallback registry"
+        source_url="$fallback_registry_url"
+        registry_fallback_used="yes"
+        log_warn "  获取默认 registry 失败，使用 fallback: $source_url"
+    else
+        include_url="$(sed -n 's/^[[:space:]]*url[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$default_registry_file" | sed -n '1p')"
+        rm -f "$default_registry_file"
+        if [ -n "$include_url" ]; then
+            source_kind="included registry"
+            source_url="$include_url"
+        else
+            source_kind="default registry"
+            source_url="$default_registry_url"
+        fi
+    fi
+
+    log "  初始化本地镜像 registry: $source_kind"
+    if ! curl -4 --retry 3 --retry-delay 2 -fL "$source_url" -o "${storage_dir}/images.toml" >> "$log_file" 2>&1; then
+        if [ "$source_url" != "$fallback_registry_url" ]; then
+            log_warn "  registry 初始化失败，重试 fallback: $fallback_registry_url"
+            registry_fallback_used="yes"
+            if ! curl -4 --retry 3 --retry-delay 2 -fL "$fallback_registry_url" -o "${storage_dir}/images.toml" >> "$log_file" 2>&1; then
+                return 1
+            fi
+        else
+            return 1
+        fi
+    fi
+
+    date +%s > "${storage_dir}/.last_sync" 2>/dev/null || true
+    return 0
+}
+
+# 下载镜像（失败时自动 bootstrap registry 并重试）
+download_image_with_retry() {
+    local test_dir="$1"
+    local image_name="$2"
+    local log_file="$3"
+    local attempt
+
+    for ((attempt=1; attempt<=IMAGE_DOWNLOAD_MAX_ATTEMPTS; attempt++)); do
+        if (cd "$test_dir" && cargo xtask image download "$image_name" >> "$log_file" 2>&1); then
+            return 0
+        fi
+
+        if [ "$attempt" -lt "$IMAGE_DOWNLOAD_MAX_ATTEMPTS" ]; then
+            image_retry_count=$((image_retry_count + 1))
+            log_warn "  镜像下载失败（第 ${attempt} 次），尝试初始化 registry 后重试: $image_name"
+            bootstrap_image_registry "$log_file" || log_warn "  registry 初始化失败，继续直接重试下载"
+        fi
+    done
+
+    return 1
+}
+
+# 检查组件是否被目标项目使用（避免 patch 成功但未进入依赖图）
+# 返回 0 表示已使用，1 表示未使用
+check_component_used() {
+    local target_name="$1"
+    local test_dir="$2"
+    local cargo_lock="$test_dir/Cargo.lock"
+    local cargo_toml="$test_dir/Cargo.toml"
+
+    # 仅对 axvisor/starry 目标做依赖图检查
+    if [[ "$target_name" != axvisor-* ]] && [[ "$target_name" != starry-* ]]; then
+        return 0
+    fi
+
+    # 优先检查 Cargo.lock 中是否出现组件包名
+    if [ -f "$cargo_lock" ]; then
+        if awk '/^\[\[package\]\]/{in_pkg=1;next} /^\[/{in_pkg=0} in_pkg && /^name = /{print}' "$cargo_lock" \
+            | grep -q "^name = \"$COMPONENT_CRATE\"$"; then
+            log_debug "  在 Cargo.lock 中检测到组件依赖: $COMPONENT_CRATE"
+            return 0
+        fi
+    fi
+
+    # 再回退到 Cargo.toml 的直接依赖检查
+    if [ -f "$cargo_toml" ] && grep -q "^$COMPONENT_CRATE\\s*=" "$cargo_toml"; then
+        log_debug "  在 Cargo.toml 中检测到组件依赖: $COMPONENT_CRATE"
+        return 0
+    fi
+
+    return 1
+}
+
+# 检查 x86_64 KVM 运行能力（NimbOS QEMU 测试依赖）
+check_kvm_available() {
+    # /dev/kvm 存在且可读写是最直接的可用性判断
+    if [ ! -e /dev/kvm ]; then
+        log_error "  未检测到 /dev/kvm，当前环境不支持 KVM 加速"
+        return 1
+    fi
+
+    if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        log_error "  /dev/kvm 无访问权限，请确认当前用户已加入 kvm 组"
+        return 1
+    fi
+
+    # 进一步检查 CPU 是否暴露虚拟化能力标志（Intel: vmx, AMD: svm）
+    if ! grep -Eq '(vmx|svm)' /proc/cpuinfo; then
+        log_error "  未检测到 CPU 虚拟化标志（vmx/svm），NimbOS 测试无法使用 KVM"
+        return 1
+    fi
+
+    log_debug "  KVM 环境检查通过"
+    return 0
+}
+
+# 写入单个目标的元信息，供报告聚合使用
+write_target_meta() {
+    local meta_file="$1"
+    local dep_state="$2"
+    local kvm_state="$3"
+    local retry_count="$4"
+    local fallback_used="$5"
+
+    cat > "$meta_file" << EOF
+dep_check=$dep_state
+kvm_check=$kvm_state
+image_retry_count=$retry_count
+registry_fallback_used=$fallback_used
+EOF
+}
+
+# 统一写入目标结果（status + meta）
+set_target_result() {
+    local status_file="$1"
+    local meta_file="$2"
+    local result="$3"
+    local dep_state="$4"
+    local kvm_state="$5"
+    local retry_count="$6"
+    local fallback_used="$7"
+
+    echo "$result" > "$status_file"
+    write_target_meta "$meta_file" "$dep_state" "$kvm_state" "$retry_count" "$fallback_used"
+}
+
 # 获取要测试的目标
 get_test_targets() {
     local targets=()
@@ -444,6 +608,11 @@ run_test_target() {
     local target_name=$1
     local log_file="$OUTPUT_DIR/logs/${target_name}_$(date +%Y%m%d_%H%M%S).log"
     local status_file="$OUTPUT_DIR/${target_name}.status"
+    local meta_file="$OUTPUT_DIR/${target_name}.meta"
+    local dependency_check_result="not_checked"
+    local kvm_check_result="not_applicable"
+    local image_retry_count=0
+    local registry_fallback_used="no"
     
     log "测试目标: $target_name"
     
@@ -451,7 +620,7 @@ run_test_target() {
     local target_config=$(echo "$CONFIG" | jq -e ".test_targets[] | select(.name == \"$target_name\")")
     if [ -z "$target_config" ]; then
         log_error "未找到测试目标配置: $target_name"
-        echo "failed" > "$status_file"
+        set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
         return 1
     fi
     
@@ -465,6 +634,17 @@ run_test_target() {
     log_debug "  类型: $test_type"
     log_debug "  构建: $build_cmd"
     log_debug "  超时: ${timeout_min}分钟"
+
+    # NimbOS x86_64 测试依赖 KVM，提前失败以减少无意义等待
+    if [[ "$target_name" == "axvisor-qemu-x86_64-nimbos" ]] && [ "$DRY_RUN" != true ]; then
+        kvm_check_result="checking"
+        if ! check_kvm_available; then
+            kvm_check_result="failed"
+            set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
+            return 1
+        fi
+        kvm_check_result="passed"
+    fi
     
     # 测试目录
     local test_dir="$OUTPUT_DIR/repos/$target_name"
@@ -477,7 +657,7 @@ run_test_target() {
         else
             if ! git clone --depth 1 -b $repo_branch "$repo_url" "$test_dir" >> "$log_file" 2>&1; then
                 log_error "  克隆仓库失败: $repo_url"
-                echo "failed" > "$status_file"
+                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 return 1
             fi
             # 初始化子模块
@@ -496,14 +676,14 @@ run_test_target() {
     # 确保仓库目录存在 (dry-run 模式下跳过)
     if [ "$DRY_RUN" != true ] && [ ! -d "$test_dir" ]; then
         log_error "  仓库目录不存在: $test_dir"
-        echo "failed" > "$status_file"
+        set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
         return 1
     fi
     
     # dry-run 模式下跳过后续操作
     if [ "$DRY_RUN" == true ]; then
         log "  DRY RUN: 跳过 patch、构建和测试"
-        echo "skipped" > "$status_file"
+        set_target_result "$status_file" "$meta_file" "skipped" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
         return 2
     fi
     
@@ -557,6 +737,18 @@ EOF
             fi
         fi
     fi
+
+    # 检查 patch 是否真正进入目标依赖图，避免“测了但没测到组件”
+    if [[ "$target_name" == axvisor-* ]] || [[ "$target_name" == starry-* ]]; then
+        if ! check_component_used "$target_name" "$test_dir"; then
+            dependency_check_result="not_used"
+            log_warn "  跳过测试: 组件 '$COMPONENT_CRATE' 未在 $target_name 依赖图中生效"
+            set_target_result "$status_file" "$meta_file" "skipped" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
+            cd "$COMPONENT_DIR"
+            return 2
+        fi
+        dependency_check_result="used"
+    fi
     
     # 执行构建
     if [ -n "$build_cmd" ]; then
@@ -596,7 +788,7 @@ EOF
                 else
                     log_error "  构建失败: $target_name (退出码: $exit_code)"
                 fi
-                echo "failed" > "$status_file"
+                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 cd "$COMPONENT_DIR"
                 return 1
             fi
@@ -632,7 +824,7 @@ EOF
                 log "  下载测试镜像..."
                 
                 # 创建镜像目录
-                local IMAGE_DIR="/tmp/.axvisor-images"
+                local IMAGE_DIR="${IMAGE_STORAGE_ROOT}"
                 mkdir -p "$IMAGE_DIR"
                 
                 # 检查并下载镜像
@@ -653,11 +845,11 @@ EOF
                         log "  镜像不存在，开始下载: $img"
                         if [ -f "$test_dir/$config" ]; then
                             cd "$test_dir"
-                            if cargo xtask image download $img >> "$log_file" 2>&1; then
+                            if download_image_with_retry "$test_dir" "$img" "$log_file"; then
                                 log_success "  镜像下载成功: $img"
                             else
                                 log_error "  镜像下载失败: $img"
-                                echo "failed" > "$status_file"
+                                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                                 cd "$COMPONENT_DIR"
                                 return 1
                             fi
@@ -716,7 +908,7 @@ EOF
                 log "  下载测试镜像..."
                 
                 # 创建镜像目录
-                local IMAGE_DIR="/tmp/.axvisor-images"
+                local IMAGE_DIR="${IMAGE_STORAGE_ROOT}"
                 mkdir -p "$IMAGE_DIR"
                 
                 # 安装 ostool（如果尚未安装）
@@ -743,16 +935,28 @@ EOF
                         log "  镜像不存在，开始下载: $img"
                         if [ -f "$test_dir/$config" ]; then
                             cd "$test_dir"
-                            if cargo xtask image download $img >> "$log_file" 2>&1; then
+                            if download_image_with_retry "$test_dir" "$img" "$log_file"; then
                                 log_success "  镜像下载成功: $img"
                             else
                                 log_error "  镜像下载失败: $img"
-                                echo "failed" > "$status_file"
+                                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                                 cd "$COMPONENT_DIR"
                                 return 1
                             fi
                         else
                             log_warn "  配置文件不存在: $config"
+                        fi
+                    fi
+
+                    # NimbOS x86_64 测试需要 BIOS 引导文件，缺失时直接失败并给出明确提示
+                    if [[ "$img" == "qemu_x86_64_nimbos" ]]; then
+                        local BIOS_IMG_PATH="${IMAGE_DIR}/${img}/axvm-bios.bin"
+                        if [ ! -f "${BIOS_IMG_PATH}" ]; then
+                            log_error "  缺少 NimbOS BIOS 文件: ${BIOS_IMG_PATH}"
+                            log_error "  请重新下载镜像或检查镜像源可用性"
+                            set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
+                            cd "$COMPONENT_DIR"
+                            return 1
                         fi
                     fi
                     
@@ -845,7 +1049,7 @@ EOF
                 log_success "  Defconfig 成功"
             else
                 log_error "  Defconfig 失败"
-                echo "failed" > "$status_file"
+                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 cd "$COMPONENT_DIR"
                 return 1
             fi
@@ -870,7 +1074,7 @@ EOF
                 log_debug "    - vm_configs: $vm_configs_json"
             else
                 log_error "  未找到 .build.toml 文件"
-                echo "failed" > "$status_file"
+                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 cd "$COMPONENT_DIR"
                 return 1
             fi
@@ -943,7 +1147,7 @@ EOF
             local exit_code=${PIPESTATUS[0]}
             if [ $exit_code -eq 0 ]; then
                 log_success "  测试成功: $target_name"
-                echo "passed" > "$status_file"
+                set_target_result "$status_file" "$meta_file" "passed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 cd "$COMPONENT_DIR"
                 return 0
             else
@@ -952,7 +1156,7 @@ EOF
                 else
                     log_error "  测试失败: $target_name (退出码: $exit_code)"
                 fi
-                echo "failed" > "$status_file"
+                set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 cd "$COMPONENT_DIR"
                 return 1
             fi
@@ -960,7 +1164,7 @@ EOF
     else
         # 没有测试配置，仅构建成功就算通过
         log_success "  仅构建，无测试: $target_name"
-        echo "passed" > "$status_file"
+        set_target_result "$status_file" "$meta_file" "passed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
         cd "$COMPONENT_DIR"
         return 0
     fi
@@ -1056,12 +1260,26 @@ EOF
         if [ -f "$status_file" ]; then
             local name=$(basename "$status_file" .status)
             local status=$(cat "$status_file")
+            local meta_file="$OUTPUT_DIR/${name}.meta"
+            local dep_check="unknown"
+            local kvm_check="unknown"
+            local image_retry_count="0"
+            local fallback_used="no"
+
+            if [ -f "$meta_file" ]; then
+                dep_check=$(sed -n 's/^dep_check=//p' "$meta_file")
+                kvm_check=$(sed -n 's/^kvm_check=//p' "$meta_file")
+                image_retry_count=$(sed -n 's/^image_retry_count=//p' "$meta_file")
+                fallback_used=$(sed -n 's/^registry_fallback_used=//p' "$meta_file")
+            fi
+
+            local details="(dep=$dep_check, kvm=$kvm_check, retries=$image_retry_count, fallback=$fallback_used)"
             if [ "$status" == "passed" ]; then
-                echo "- $name: ✅ 通过" >> "$report_file"
+                echo "- $name: ✅ 通过 $details" >> "$report_file"
             elif [ "$status" == "skipped" ]; then
-                echo "- $name: ⏭️ 跳过 (需要硬件)" >> "$report_file"
+                echo "- $name: ⏭️ 跳过 $details" >> "$report_file"
             else
-                echo "- $name: ❌ 失败" >> "$report_file"
+                echo "- $name: ❌ 失败 $details" >> "$report_file"
             fi
         fi
     done
