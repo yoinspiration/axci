@@ -165,6 +165,16 @@ check_dependencies() {
     if ! command -v cargo &> /dev/null; then
         missing+=("cargo (Rust)")
     fi
+
+    # 检查 python3（NimbOS 自动输入脚本依赖）
+    if ! command -v python3 &> /dev/null; then
+        missing+=("python3")
+    fi
+
+    # 检查 script（board 测试 PTY 依赖）
+    if ! command -v script &> /dev/null; then
+        missing+=("script (util-linux)")
+    fi
     
     if [ ${#missing[@]} -gt 0 ]; then
         error "缺少依赖: ${missing[*]}\n请安装后重试。"
@@ -797,6 +807,10 @@ EOF
             local qemu_config=$(echo "$target_config" | jq -r '.test.qemu_config')
             local vmconfigs=$(echo "$target_config" | jq -r '.test.vmconfigs')
             full_test_cmd="$test_cmd --build-config $build_config --qemu-config $qemu_config --vmconfigs $vmconfigs"
+            # NimbOS 需要自动输入 usertests，通过 PTY 包装器执行。
+            if [[ "$target_name" == "axvisor-qemu-x86_64-nimbos" ]]; then
+                full_test_cmd="python3 $FRAMEWORK_DIR/scripts/ci_run_qemu_nimbos.py -- $full_test_cmd"
+            fi
         elif [[ "$target_name" == axvisor-board-* ]]; then
             # Axvisor Board 测试
             local build_config=$(echo "$target_config" | jq -r '.test.build_config')
@@ -920,13 +934,19 @@ EOF
         else
             cd "$test_dir"
             export RUST_LOG=debug
-            if $full_test_cmd 2>&1 | tee -a "$log_file"; then
+            # Board 测试通过 PTY 运行，避免 crossterm 在非 TTY 环境异常。
+            if [[ "$target_name" == axvisor-board-* ]]; then
+                timeout "${test_timeout}m" script -q -c "$full_test_cmd" /dev/null 2>&1 | tee -a "$log_file"
+            else
+                timeout "${test_timeout}m" sh -c "$full_test_cmd" 2>&1 | tee -a "$log_file"
+            fi
+            local exit_code=${PIPESTATUS[0]}
+            if [ $exit_code -eq 0 ]; then
                 log_success "  测试成功: $target_name"
                 echo "passed" > "$status_file"
                 cd "$COMPONENT_DIR"
                 return 0
             else
-                local exit_code=$?
                 if [ $exit_code -eq 124 ]; then
                     log_error "  测试超时: $target_name"
                 else
