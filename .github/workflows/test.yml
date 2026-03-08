@@ -328,6 +328,22 @@ jobs:
           path: axvisor
           submodules: recursive
 
+      - name: Install Rust toolchain for axvisor build
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: rust-src, llvm-tools
+          targets: x86_64-unknown-none, aarch64-unknown-none-softfloat
+
+      - name: Ensure rust-objcopy is available
+        run: |
+          if command -v rust-objcopy >/dev/null 2>&1; then
+            rust-objcopy --version
+          else
+            cargo install cargo-binutils
+            rust-objcopy --version
+          fi
+
       - name: Get component crate name
         id: component
         working-directory: component
