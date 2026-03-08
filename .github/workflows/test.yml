@@ -344,6 +344,13 @@ jobs:
             rust-objcopy --version
           fi
 
+      - name: Setup QEMU for axvisor tests
+        if: matrix.type == 'qemu'
+        uses: arceos-org/setup-qemu@v1
+        with:
+          version: 10.1.0
+          arch_list: ${{ matrix.arch }}
+
       - name: Get component crate name
         id: component
         working-directory: component
