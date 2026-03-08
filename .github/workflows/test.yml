@@ -354,8 +354,37 @@ jobs:
           echo "Applied patch:"
           tail -10 Cargo.toml
 
-      - name: Install dependencies
-        run: cargo +stable install ostool --version ^0.8
+      - name: Install host dependencies for ostool
+        run: |
+          set -e
+          if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libudev; then
+            echo "libudev is already available"
+            exit 0
+          fi
+
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y pkg-config libudev-dev
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y pkgconf-pkg-config systemd-devel
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y pkgconfig systemd-devel
+          elif command -v apk >/dev/null 2>&1; then
+            sudo apk add --no-cache pkgconf eudev-dev
+          else
+            echo "No supported package manager found to install libudev development headers."
+            exit 1
+          fi
+
+          pkg-config --exists libudev
+
+      - name: Install ostool
+        run: |
+          if command -v ostool >/dev/null 2>&1; then
+            ostool --version
+          else
+            cargo +stable install ostool --version ^0.8
+          fi
 
       - name: Download images and patch vm configs (QEMU only)
         if: matrix.type == 'qemu'
