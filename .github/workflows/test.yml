@@ -339,11 +339,30 @@ jobs:
           fi
           echo "crate_name=$CRATE_NAME" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve component patch path
+        id: component_path
+        run: |
+          CRATE_NAME="${{ steps.component.outputs.crate_name }}"
+          PATCH_PATH="$(pwd)/component"
+
+          if [ -f component/Cargo.toml ]; then
+            MANIFEST_PATH=$(cargo metadata --manifest-path component/Cargo.toml --format-version 1 --no-deps \
+              | jq -r --arg name "$CRATE_NAME" '.packages[] | select(.name == $name) | .manifest_path' \
+              | sed -n '1p')
+            if [ -n "$MANIFEST_PATH" ] && [ "$MANIFEST_PATH" != "null" ]; then
+              PATCH_PATH="$(dirname "$MANIFEST_PATH")"
+            fi
+          fi
+
+          echo "patch_path=$PATCH_PATH" >> "$GITHUB_OUTPUT"
+          echo "Resolved patch path: $PATCH_PATH"
+
       - name: Apply patch to Cargo.toml
         working-directory: axvisor
         run: |
           CRATE_NAME="${{ steps.component.outputs.crate_name }}"
-          PATCH_LINE="$CRATE_NAME = { path = \"../component\" }"
+          PATCH_PATH="${{ steps.component_path.outputs.patch_path }}"
+          PATCH_LINE="$CRATE_NAME = { path = \"$PATCH_PATH\" }"
           if grep -q '^\[patch.crates-io\]' Cargo.toml; then
             sed -i "/^\[patch.crates-io\]/a $PATCH_LINE" Cargo.toml
           else
@@ -492,11 +511,30 @@ jobs:
           fi
           echo "crate_name=$CRATE_NAME" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve component patch path
+        id: component_path
+        run: |
+          CRATE_NAME="${{ steps.component.outputs.crate_name }}"
+          PATCH_PATH="$(pwd)/component"
+
+          if [ -f component/Cargo.toml ]; then
+            MANIFEST_PATH=$(cargo metadata --manifest-path component/Cargo.toml --format-version 1 --no-deps \
+              | jq -r --arg name "$CRATE_NAME" '.packages[] | select(.name == $name) | .manifest_path' \
+              | sed -n '1p')
+            if [ -n "$MANIFEST_PATH" ] && [ "$MANIFEST_PATH" != "null" ]; then
+              PATCH_PATH="$(dirname "$MANIFEST_PATH")"
+            fi
+          fi
+
+          echo "patch_path=$PATCH_PATH" >> "$GITHUB_OUTPUT"
+          echo "Resolved patch path: $PATCH_PATH"
+
       - name: Apply patch to Cargo.toml
         working-directory: starry
         run: |
           CRATE_NAME="${{ steps.component.outputs.crate_name }}"
-          PATCH_LINE="$CRATE_NAME = { path = \"../component\" }"
+          PATCH_PATH="${{ steps.component_path.outputs.patch_path }}"
+          PATCH_LINE="$CRATE_NAME = { path = \"$PATCH_PATH\" }"
           if grep -q '^\[patch.crates-io\]' Cargo.toml; then
             sed -i "/^\[patch.crates-io\]/a $PATCH_LINE" Cargo.toml
           else
