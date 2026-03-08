@@ -214,14 +214,14 @@ jobs:
           AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --argjson targets "$TARGETS_JSON" '
             if (($targets | length) == 0) or (($targets | index("all")) != null) or (($targets | index("axvisor")) != null)
             then map(del(.target_key))
-            else map(select(($targets | index(.target_key)) != null)) | map(del(.target_key))
+            else map(select(. as $item | ($targets | index($item.target_key)) != null)) | map(del(.target_key))
             end
           ')
 
           STARRY_MATRIX=$(echo "$STARRY_ALL" | jq -c --argjson targets "$TARGETS_JSON" '
             if (($targets | length) == 0) or (($targets | index("all")) != null) or (($targets | index("starry")) != null)
             then map(del(.target_key))
-            else map(select(($targets | index(.target_key)) != null)) | map(del(.target_key))
+            else map(select(. as $item | ($targets | index($item.target_key)) != null)) | map(del(.target_key))
             end
           ')
 
