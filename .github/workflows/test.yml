@@ -296,10 +296,8 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.detect.outputs.axvisor_matrix) }}
-    runs-on:
-      - self-hosted
-      - linux
-      - ${{ matrix.type == 'qemu' && 'intel' || matrix.board }}
+    # Use hosted runner to avoid fork users being blocked by self-hosted labels.
+    runs-on: ubuntu-latest
 
     steps:
       - name: Clean up workspace
