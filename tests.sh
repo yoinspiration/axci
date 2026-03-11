@@ -31,6 +31,12 @@ CLEANUP=true
 DRY_RUN=false
 PARALLEL=true
 OUTPUT_DIR=""
+USE_GIT=false
+GIT_BRANCH=""
+CLEAN_RESULTS=false
+AUTO_MODE=false
+LIST_JSON=false
+LIST_AUTO=false
 
 # 帮助信息
 show_help() {
@@ -49,9 +55,16 @@ Hypervisor Test Framework - 本地测试脚本
   --no-cleanup               不清理临时文件
   --dry-run                  仅显示将要执行的命令
   --sequential               顺序执行测试 (不并行)
+  --from-git                 从 git 仓库拉取代码 (默认从 crates.io 下载)
+  --branch BRANCH            指定 git 分支 (仅与 --from-git 一起使用)
+  --clean                    清理测试生成的 test-results 目录
+  --auto                     根据 rust-toolchain.toml 中的 targets 自动选择测试
+  --list-auto                列出自动检测的测试目标 (JSON 格式)
+  --list-json                列出所有测试目标 (JSON 格式，用于 CI matrix)
   -h, --help                 显示此帮助
 
 测试目标:
+  list                       列出所有可用的测试用例
   all                        运行所有测试
   axvisor-qemu               运行所有 axvisor QEMU 测试
   axvisor-board              运行所有 axvisor Board 测试
@@ -74,6 +87,7 @@ Hypervisor Test Framework - 本地测试脚本
 
 示例:
   tests.sh                                    # 在当前目录运行所有测试
+  tests.sh --auto                             # 根据 rust-toolchain.toml 自动选择测试
   tests.sh -t axvisor-qemu                    # 仅运行 axvisor QEMU 测试
   tests.sh -t axvisor-board                   # 仅运行 axvisor Board 测试
   tests.sh -t starry-aarch64                  # 仅运行 starry aarch64 测试
@@ -119,6 +133,31 @@ parse_args() {
                 PARALLEL=false
                 shift
                 ;;
+            --from-git)
+                USE_GIT=true
+                shift
+                ;;
+            --branch)
+                GIT_BRANCH="$2"
+                shift 2
+                ;;
+            --clean)
+                CLEAN_RESULTS=true
+                shift
+                ;;
+            --auto)
+                AUTO_MODE=true
+                shift
+                ;;
+            --list-json)
+                LIST_JSON=true
+                shift
+                ;;
+            --list-auto)
+                LIST_AUTO=true
+                AUTO_MODE=true
+                shift
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -145,31 +184,98 @@ log_debug() {
 
 error() { log_error "$1"; exit 1; }
 
+# 从 rust-toolchain.toml 中提取 targets 并映射到架构
+detect_targets_from_toolchain() {
+    local toolchain_file="$COMPONENT_DIR/rust-toolchain.toml"
+    local detected_archs=()
+
+    if [ ! -f "$toolchain_file" ]; then
+        log_warn "未找到 rust-toolchain.toml，使用所有架构"
+        echo "all"
+        return
+    fi
+
+    # 提取 targets 数组
+    local targets=$(grep -A 20 '^targets' "$toolchain_file" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' || true)
+
+    if [ -z "$targets" ]; then
+        log_warn "rust-toolchain.toml 中未找到 targets，使用所有架构"
+        echo "all"
+        return
+    fi
+
+    log_debug "从 rust-toolchain.toml 检测到 targets:"
+
+    # 解析每个 target 并映射到架构
+    while IFS= read -r target; do
+        [ -z "$target" ] && continue
+        log_debug "  - $target"
+
+        case "$target" in
+            *aarch64*)
+                if [[ " ${detected_archs[*]} " != *" aarch64 "* ]]; then
+                    detected_archs+=("aarch64")
+                fi
+                ;;
+            *x86_64*)
+                if [[ " ${detected_archs[*]} " != *" x86_64 "* ]]; then
+                    detected_archs+=("x86_64")
+                fi
+                ;;
+            *riscv64*)
+                if [[ " ${detected_archs[*]} " != *" riscv64 "* ]]; then
+                    detected_archs+=("riscv64")
+                fi
+                ;;
+            *loongarch64*)
+                if [[ " ${detected_archs[*]} " != *" loongarch64 "* ]]; then
+                    detected_archs+=("loongarch64")
+                fi
+                ;;
+        esac
+    done <<< "$targets"
+
+    if [ ${#detected_archs[@]} -eq 0 ]; then
+        log_warn "无法从 targets 识别架构，使用所有架构"
+        echo "all"
+        return
+    fi
+
+    log "检测到的架构: ${detected_archs[*]}"
+    echo "${detected_archs[*]}"
+}
+
 # 检查依赖
 check_dependencies() {
     log "检查依赖..."
-    
+
     local missing=()
-    
+
     # 检查 jq
     if ! command -v jq &> /dev/null; then
         missing+=("jq")
     fi
-    
+
     # 检查 git
     if ! command -v git &> /dev/null; then
         missing+=("git")
     fi
-    
+
     # 检查 cargo
     if ! command -v cargo &> /dev/null; then
         missing+=("cargo (Rust)")
     fi
-    
+
     if [ ${#missing[@]} -gt 0 ]; then
         error "缺少依赖: ${missing[*]}\n请安装后重试。"
     fi
-    
+
+    # 检查并安装 cargo-clone
+    if ! command -v cargo-clone &> /dev/null && ! cargo clone --help &> /dev/null; then
+        log "安装 cargo-clone..."
+        cargo install cargo-clone
+    fi
+
     log_success "依赖检查通过"
 }
 
@@ -225,7 +331,7 @@ DEFAULT_TARGETS='[
     "type": "qemu",
     "arch": "riscv64",
     "repo": {"url": "https://github.com/Starry-OS/StarryOS", "branch": "main"},
-    "build": {"command": "make build", "timeout_minutes": 30},
+    "build": {"command": "make build", "timeout_minutes": 15},
     "test": {},
     "patch": {"path_template": "../component"}
   },
@@ -234,7 +340,7 @@ DEFAULT_TARGETS='[
     "type": "qemu",
     "arch": "loongarch64",
     "repo": {"url": "https://github.com/Starry-OS/StarryOS", "branch": "main"},
-    "build": {"command": "make build", "timeout_minutes": 30},
+    "build": {"command": "make build", "timeout_minutes": 15},
     "test": {},
     "patch": {"path_template": "../component"}
   },
@@ -243,7 +349,7 @@ DEFAULT_TARGETS='[
     "type": "qemu",
     "arch": "aarch64",
     "repo": {"url": "https://github.com/Starry-OS/StarryOS", "branch": "main"},
-    "build": {"command": "make build", "timeout_minutes": 30},
+    "build": {"command": "make build", "timeout_minutes": 15},
     "test": {},
     "patch": {"path_template": "../component"}
   },
@@ -252,7 +358,7 @@ DEFAULT_TARGETS='[
     "type": "qemu",
     "arch": "x86_64",
     "repo": {"url": "https://github.com/Starry-OS/StarryOS", "branch": "main"},
-    "build": {"command": "make build", "timeout_minutes": 30},
+    "build": {"command": "make build", "timeout_minutes": 15},
     "test": {},
     "patch": {"path_template": "../component"}
   },
@@ -379,16 +485,144 @@ setup_output() {
     if [ -z "$OUTPUT_DIR" ]; then
         OUTPUT_DIR="$COMPONENT_DIR/test-results"
     fi
-    
-    mkdir -p "$OUTPUT_DIR/logs"
+
+    sudo mkdir -p "$OUTPUT_DIR/logs"
+    sudo chmod -R 777 "$OUTPUT_DIR"
     log_debug "输出目录: $OUTPUT_DIR"
+}
+
+# 运行命令并监控输出，检测成功/失败标识符
+run_with_success_detection() {
+    local cmd="$1"
+    local timeout_minutes="$2"
+    local log_file="$3"
+    local success_patterns=()
+    local error_patterns=()
+
+    # 定义成功标识符模式（支持通配符）
+    success_patterns+=("Welcome to")
+    success_patterns+=("test pass!")
+    success_patterns+=("All tests passed!")
+    success_patterns+=("simple_sleep passed!")
+    success_patterns+=("Hello, world!")
+    success_patterns+=("root@firefly:~#")
+    success_patterns+=("root@phytium-Ubuntu:~#")
+    success_patterns+=("Set hostname to")
+    success_patterns+=("starry:~#")
+    success_patterns+=("Last login:")
+    # 定义错误标识符模式
+    error_patterns+=("error:")
+    error_patterns+=("error[")
+    error_patterns+=("FAILED")
+    error_patterns+=("panicked")
+    error_patterns+=("segmentation fault")
+    error_patterns+=("core dumped")
+
+    # 创建临时文件来存储状态
+    local status_file=$(mktemp)
+    echo "running" > "$status_file"
+
+    # 使用 timeout 运行命令，同时监控输出
+    local pid=""
+    local fifo=$(mktemp -u)
+    mkfifo "$fifo"
+
+    # 启动命令并将输出重定向到管道
+    eval "$cmd" < /dev/null > "$fifo" 2>&1 &
+    pid=$!
+
+    # 在后台读取管道并检测成功/错误标识符
+    (
+        while IFS= read -r line; do
+            # 输出到日志
+            echo "$line" >> "$log_file"
+
+            # 检测是否匹配任何错误标识符（优先检测错误）
+            for pattern in "${error_patterns[@]}"; do
+                if [[ "$line" == *"$pattern"* ]]; then
+                    echo "error:$pattern" > "$status_file"
+                    kill $pid 2>/dev/null || true
+                    exit 0
+                fi
+            done
+
+            # 检测是否匹配任何成功标识符
+            for pattern in "${success_patterns[@]}"; do
+                if [[ "$line" == *"$pattern"* ]]; then
+                    echo "success" > "$status_file"
+                    kill $pid 2>/dev/null || true
+                    exit 0
+                fi
+            done
+        done < "$fifo"
+    ) &
+    local monitor_pid=$!
+
+    # 设置超时等待进程完成
+    timeout "${timeout_minutes}m" tail --pid=$pid -f /dev/null 2>/dev/null || true
+    local exit_code=$?
+
+    # 等待监控进程完成
+    wait $monitor_pid 2>/dev/null || true
+
+    # 读取状态
+    local status=$(cat "$status_file")
+
+    # 清理
+    rm -f "$fifo" "$status_file"
+
+    # 根据状态返回结果
+    if [[ "$status" == error:* ]]; then
+        local pattern=${status#error:}
+        return 1
+    elif [ "$status" = "success" ]; then
+        return 0
+    elif [ $exit_code -eq 124 ]; then
+        return 124
+    else
+        return 1
+    fi
 }
 
 # 获取要测试的目标
 get_test_targets() {
     local targets=()
-    
-    if [ "$TEST_TARGET" == "all" ]; then
+
+    if [ "$AUTO_MODE" == true ]; then
+        # 自动模式：根据 rust-toolchain.toml 中的 targets 选择测试
+        local archs=$(detect_targets_from_toolchain)
+
+        if [ "$archs" == "all" ]; then
+            # 无法识别架构，运行所有测试
+            local count=$(echo "$CONFIG" | jq '.test_targets | length')
+            for ((i=0; i<count; i++)); do
+                targets+=("$(echo "$CONFIG" | jq -r ".test_targets[$i].name")")
+            done
+        else
+            # 根据检测到的架构选择测试目标
+            local count=$(echo "$CONFIG" | jq '.test_targets | length')
+            for ((i=0; i<count; i++)); do
+                local name=$(echo "$CONFIG" | jq -r ".test_targets[$i].name")
+                local target_arch=$(echo "$CONFIG" | jq -r ".test_targets[$i].arch")
+
+                # 检查目标架构是否在检测到的架构列表中
+                for arch in $archs; do
+                    if [ "$target_arch" == "$arch" ]; then
+                        targets+=("$name")
+                        break
+                    fi
+                done
+            done
+        fi
+
+        if [ ${#targets[@]} -eq 0 ]; then
+            log_warn "未找到匹配的测试目标，运行所有测试"
+            local count=$(echo "$CONFIG" | jq '.test_targets | length')
+            for ((i=0; i<count; i++)); do
+                targets+=("$(echo "$CONFIG" | jq -r ".test_targets[$i].name")")
+            done
+        fi
+    elif [ "$TEST_TARGET" == "all" ]; then
         # 从配置获取所有目标
         local count=$(echo "$CONFIG" | jq '.test_targets | length')
         for ((i=0; i<count; i++)); do
@@ -425,17 +659,93 @@ get_test_targets() {
         # 具体目标名称
         targets+=("$TEST_TARGET")
     fi
-    
+
     echo "${targets[@]}"
+}
+
+# 检查组件是否被目标项目使用（从 Cargo.lock 中检索）
+# 返回 0 表示使用，1 表示未使用
+check_component_used() {
+    local target_name=$1
+    local test_dir=$2
+    
+    # 如果不是 axvisor 或 starry 相关的测试，直接返回使用
+    if [[ "$target_name" != axvisor-* ]] && [[ "$target_name" != starry-* ]]; then
+        return 0
+    fi
+    
+    local cargo_lock="$test_dir/Cargo.lock"
+    
+    # 如果 Cargo.lock 不存在，尝试从 Cargo.toml 检查
+    if [ ! -f "$cargo_lock" ]; then
+        local cargo_toml="$test_dir/Cargo.toml"
+        if [ ! -f "$cargo_toml" ]; then
+            log_warn "  未找到 Cargo.toml 或 Cargo.lock，无法检查依赖关系"
+            return 0
+        fi
+        
+        # 从 Cargo.toml 检查是否有该组件的依赖
+        if grep -q "^$COMPONENT_CRATE\s*=" "$cargo_toml" 2>/dev/null; then
+            log_debug "  在 Cargo.toml 中找到组件: $COMPONENT_CRATE"
+            return 0
+        fi
+        
+        # 检查 workspace members 是否可能包含该组件
+        if grep -q "^$COMPONENT_CRATE\s*=" "$test_dir"/*/Cargo.toml 2>/dev/null; then
+            log_debug "  在 workspace member 中找到组件: $COMPONENT_CRATE"
+            return 0
+        fi
+        
+        return 1
+    fi
+    
+    # 从 Cargo.lock 中检查组件
+    # Cargo.lock 格式：[[package]] name = "crate-name"
+    if grep -A 1 '^\[\[package\]\]' "$cargo_lock" 2>/dev/null | grep -q "name = \"$COMPONENT_CRATE\""; then
+        log_debug "  在 Cargo.lock 中找到组件: $COMPONENT_CRATE"
+        return 0
+    fi
+    
+    # 如果直接没找到，尝试从 Cargo.toml 再确认一下（可能是间接依赖）
+    local cargo_toml="$test_dir/Cargo.toml"
+    if [ -f "$cargo_toml" ] && grep -q "^$COMPONENT_CRATE\s*=" "$cargo_toml" 2>/dev/null; then
+        log_debug "  在 Cargo.toml 中找到组件: $COMPONENT_CRATE"
+        return 0
+    fi
+    
+    return 1
+}
+
+# 检查并关闭占用端口5555的程序
+kill_port_5555_processes() {
+    local pids=$(sudo lsof -ti :5555 2>/dev/null)
+    
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            log_debug "    关闭进程: PID=$pid"
+            sudo kill -9 $pid 2>/dev/null || true
+        done
+        # 等待端口释放
+        sleep 1
+    fi
 }
 
 # 运行单个测试目标
 run_test_target() {
     local target_name=$1
+    local current_index=${2:-0}
+    local total_count=${3:-1}
     local log_file="$OUTPUT_DIR/logs/${target_name}_$(date +%Y%m%d_%H%M%S).log"
     local status_file="$OUTPUT_DIR/${target_name}.status"
     
-    log "测试目标: $target_name"
+    if [ $total_count -gt 1 ]; then
+        log "[$current_index/$total_count] 测试目标: $target_name"
+    else
+        log "测试目标: $target_name"
+    fi
+    
+    # 在测试开始前检查并关闭端口5555
+    kill_port_5555_processes
     
     # 获取目标配置
     local target_config=$(echo "$CONFIG" | jq -e ".test_targets[] | select(.name == \"$target_name\")")
@@ -447,6 +757,12 @@ run_test_target() {
     
     local repo_url=$(echo "$target_config" | jq -r '.repo.url')
     local repo_branch=$(echo "$target_config" | jq -r '.repo.branch // "main"')
+    
+    # 如果指定了 --branch 参数，则使用指定的分支
+    if [ -n "$GIT_BRANCH" ]; then
+        repo_branch="$GIT_BRANCH"
+        log "  使用指定分支: $repo_branch"
+    fi
     local test_type=$(echo "$target_config" | jq -r '.type // "qemu"')
     local build_cmd=$(echo "$target_config" | jq -r '.build.command')
     local timeout_min=$(echo "$target_config" | jq -r '.build.timeout_minutes // 15')
@@ -461,25 +777,44 @@ run_test_target() {
     
     # 克隆或更新仓库
     if [ ! -d "$test_dir" ]; then
-        log "  克隆仓库..."
-        if [ "$DRY_RUN" == true ]; then
-            echo "[DRY-RUN] git clone --depth 1 -b $repo_branch $repo_url $test_dir"
-        else
-            if ! git clone --depth 1 -b $repo_branch "$repo_url" "$test_dir" >> "$log_file" 2>&1; then
-                log_error "  克隆仓库失败: $repo_url"
-                echo "failed" > "$status_file"
-                return 1
+        # 判断是否为 axvisor 目标，且未使用 --git 选项时，使用 cargo clone 从 crates.io 下载
+        if [[ "$target_name" == axvisor-* ]] && [ "$USE_GIT" == false ]; then
+            log "  从 crates.io 下载 axvisor..."
+            if [ "$DRY_RUN" == true ]; then
+                echo "[DRY-RUN] cargo clone axvisor -- $test_dir"
+            else
+                if ! cargo clone axvisor -- "$test_dir" >> "$log_file" 2>&1; then
+                    log_error "  下载 axvisor 失败"
+                    echo "failed" > "$status_file"
+                    return 1
+                fi
             fi
-            # 初始化子模块
-            if [ -f "$test_dir/.gitmodules" ]; then
-                log "  初始化子模块..."
-                (cd "$test_dir" && git submodule update --init --recursive) >> "$log_file" 2>&1 || true
+        else
+            log "  克隆仓库..."
+            if [ "$DRY_RUN" == true ]; then
+                echo "[DRY-RUN] git clone --depth 1 -b $repo_branch $repo_url $test_dir"
+            else
+                if ! git clone --depth 1 -b $repo_branch "$repo_url" "$test_dir" >> "$log_file" 2>&1; then
+                    log_error "  克隆仓库失败: $repo_url"
+                    echo "failed" > "$status_file"
+                    return 1
+                fi
+                # 初始化子模块
+                if [ -f "$test_dir/.gitmodules" ]; then
+                    log "  初始化子模块..."
+                    (cd "$test_dir" && git submodule update --init --recursive) >> "$log_file" 2>&1 || true
+                fi
             fi
         fi
     else
         log "  更新仓库..."
         if [ "$DRY_RUN" != true ]; then
-            (cd "$test_dir" && git pull) >> "$log_file" 2>&1 || true
+            if [[ "$target_name" == axvisor-* ]] && [ "$USE_GIT" == false ]; then
+                # axvisor 使用 cargo clone，不进行 git pull
+                log "  axvisor 从 crates.io 下载，跳过更新"
+            else
+                (cd "$test_dir" && git pull) >> "$log_file" 2>&1 || true
+            fi
         fi
     fi
     
@@ -495,6 +830,15 @@ run_test_target() {
         log "  DRY RUN: 跳过 patch、构建和测试"
         echo "skipped" > "$status_file"
         return 2
+    fi
+    
+    # 检查当前组件是否被目标项目使用（针对 axvisor/starry 测试）
+    if [[ "$target_name" == axvisor-* ]] || [[ "$target_name" == starry-* ]]; then
+        if ! check_component_used "$target_name" "$test_dir"; then
+            log_warn "  跳过测试: 当前组件 '$COMPONENT_CRATE' 未在 $target_name 的依赖中使用"
+            echo "skipped" > "$status_file"
+            return 2
+        fi
     fi
     
     # 应用 patch - 与 CI 逻辑保持一致
@@ -513,7 +857,6 @@ run_test_target() {
             patch_path="$(cd "$resolved_path" && pwd)"
         else
             # 如果相对路径解析失败，直接使用组件目录的绝对路径
-            log "  相对路径 $patch_path 不存在，使用组件目录: $COMPONENT_DIR"
             patch_path="$COMPONENT_DIR"
         fi
     fi
@@ -525,9 +868,9 @@ run_test_target() {
         cd "$test_dir"
         
         # 检查是否已添加该组件的 patch（只在 [patch.*] section 中检查）
-        # 使用 awk 提取所有 [patch.*] section 的内容并检查
-        local already_patched=$(awk '/^\[patch\./,/^\[/ {print}' Cargo.toml 2>/dev/null | grep -q "^$COMPONENT_CRATE\s*=" && echo "yes" || echo "no")
-        if [ "$already_patched" == "yes" ]; then
+        # 使用 grep 检查 patch section 中是否已有该组件
+        if grep -E "^\[patch\." Cargo.toml >/dev/null 2>&1 && \
+           grep -A 100 "^\[patch\." Cargo.toml | grep -q "^$COMPONENT_CRATE\s*="; then
             log "  组件 $COMPONENT_CRATE 已在 patch 中"
         else
             # 检查是否已存在 [patch.$patch_section] section
@@ -566,17 +909,25 @@ EOF
             fi
             
             if timeout "${timeout_min}m" sh -c "$actual_build_cmd" >> "$log_file" 2>&1; then
-                log_success "  构建成功: $target_name"
-                
+
                 # 为 starry 测试准备 rootfs
                 if [[ "$target_name" == starry-* ]]; then
                     log "  准备 rootfs..."
                     local arch=$(echo "$target_config" | jq -r '.arch')
                     # 将 ARCH 作为 make 参数传递，而不是环境变量
-                    if timeout "${timeout_min}m" sh -c "make rootfs ARCH=$arch" >> "$log_file" 2>&1; then
-                        log_success "  Rootfs 准备成功"
+                    # rootfs 准备使用独立的超时时间（1分钟）
+                    if timeout 1m sh -c "make rootfs ARCH=$arch" >> "$log_file" 2>&1; then
+                        log "  Rootfs 准备完成"
                     else
-                        log_warn "  Rootfs 准备失败，继续测试（可能影响测试结果）"
+                        local rootfs_exit_code=$?
+                        if [ $rootfs_exit_code -eq 124 ]; then
+                            log_error "  Rootfs 准备超时，请检查网络环境"
+                        else
+                            log_error "  Rootfs 准备失败（退出码: $rootfs_exit_code）: $target_name"
+                        fi
+                        echo "failed" > "$status_file"
+                        cd "$COMPONENT_DIR"
+                        return 1
                     fi
                 fi
             else
@@ -611,7 +962,8 @@ EOF
             
             # 创建 TFTP 目录
             local bin_dir=$(echo "$target_config" | jq -r '.test.bin_dir // "/tmp/tftp"')
-            mkdir -p "$bin_dir"
+            sudo mkdir -p "$bin_dir"
+            sudo chmod 777 "$bin_dir"
             log "  TFTP 目录已准备: $bin_dir"
             
             # 下载镜像和配置（类似 QEMU 测试）
@@ -623,7 +975,8 @@ EOF
                 
                 # 创建镜像目录
                 local IMAGE_DIR="/tmp/.axvisor-images"
-                mkdir -p "$IMAGE_DIR"
+                sudo mkdir -p "$IMAGE_DIR"
+                sudo chmod 777 "$IMAGE_DIR"
                 
                 # 检查并下载镜像
                 IFS=',' read -ra CONFIGS <<< "$vmconfigs"
@@ -707,7 +1060,8 @@ EOF
                 
                 # 创建镜像目录
                 local IMAGE_DIR="/tmp/.axvisor-images"
-                mkdir -p "$IMAGE_DIR"
+                sudo mkdir -p "$IMAGE_DIR"
+                sudo chmod 777 "$IMAGE_DIR"
                 
                 # 安装 ostool（如果尚未安装）
                 if ! command -v ostool &> /dev/null; then
@@ -920,18 +1274,23 @@ EOF
         else
             cd "$test_dir"
             export RUST_LOG=debug
-            if $full_test_cmd 2>&1 | tee -a "$log_file"; then
+
+            # 使用成功检测函数运行测试
+            run_with_success_detection "$full_test_cmd" "${test_timeout}" "$log_file"
+            local exit_code=$?
+
+            if [ $exit_code -eq 0 ]; then
                 log_success "  测试成功: $target_name"
                 echo "passed" > "$status_file"
                 cd "$COMPONENT_DIR"
                 return 0
+            elif [ $exit_code -eq 124 ]; then
+                log_error "  测试超时（未检测到成功标识符）: $target_name"
+                echo "failed" > "$status_file"
+                cd "$COMPONENT_DIR"
+                return 1
             else
-                local exit_code=$?
-                if [ $exit_code -eq 124 ]; then
-                    log_error "  测试超时: $target_name"
-                else
-                    log_error "  测试失败: $target_name (退出码: $exit_code)"
-                fi
+                log_error "  测试失败（退出码: $exit_code）: $target_name"
                 echo "failed" > "$status_file"
                 cd "$COMPONENT_DIR"
                 return 1
@@ -957,14 +1316,21 @@ run_all_tests() {
     
     # 转换为数组
     read -ra target_array <<< "$targets"
-    
+    local total_count=${#target_array[@]}
+
     log "测试目标: ${target_array[*]}"
     echo ""
-    
-    if [ "$PARALLEL" == true ] && [ ${#target_array[@]} -gt 1 ]; then
+
+    local force_sequential=false
+    if [[ "$TEST_TARGET" == "all" ]] || [[ "$TEST_TARGET" == "starry" ]] || [[ "$TEST_TARGET" == "axvisor-board" ]]; then
+        force_sequential=true
+    fi
+
+    if [ "$PARALLEL" == true ] && [ $total_count -gt 1 ] && [ "$force_sequential" == false ]; then
         # 并行执行
-        for target in "${target_array[@]}"; do
-            run_test_target "$target" &
+        for i in "${!target_array[@]}"; do
+            local target="${target_array[$i]}"
+            run_test_target "$target" $((i+1)) $total_count &
             pids+=($!)
         done
         
@@ -978,8 +1344,9 @@ run_all_tests() {
         done
     else
         # 顺序执行
-        for target in "${target_array[@]}"; do
-            run_test_target "$target"
+        for i in "${!target_array[@]}"; do
+            local target="${target_array[$i]}"
+            run_test_target "$target" $((i+1)) $total_count
             local exit_code=$?
             if [ $exit_code -eq 0 ]; then
                 ((passed++))
@@ -1066,43 +1433,93 @@ cleanup() {
 # 主函数
 main() {
     parse_args "$@"
-    
+
+    # 处理 --clean 命令
+    if [ "$CLEAN_RESULTS" == true ]; then
+        if [ -z "$OUTPUT_DIR" ]; then
+            # 如果未指定输出目录，使用默认目录
+            if [ -z "$COMPONENT_DIR" ]; then
+                COMPONENT_DIR="$(pwd)"
+            fi
+            OUTPUT_DIR="$COMPONENT_DIR/test-results"
+        fi
+        if [ -d "$OUTPUT_DIR" ]; then
+            log "清理测试目录: $OUTPUT_DIR"
+            sudo rm -rf "$OUTPUT_DIR"
+            log_success "清理完成"
+        else
+            log "测试目录不存在: $OUTPUT_DIR"
+        fi
+        exit 0
+    fi
+
+    # 处理 --list-json: 输出所有测试目标的 JSON 数组 (用于 CI matrix)
+    # 必须在任何日志输出之前处理
+    if [ "$LIST_JSON" == true ]; then
+        load_config >/dev/null 2>&1
+        local targets=$(echo "$CONFIG" | jq -c '[.test_targets[].name]')
+        echo "$targets"
+        exit 0
+    fi
+
+    # 处理 --list-auto: 输出自动检测的测试目标 (用于 CI matrix)
+    if [ "$LIST_AUTO" == true ]; then
+        load_config >/dev/null 2>&1
+        local targets=$(get_test_targets)
+        echo "$targets" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -s -c
+        exit 0
+    fi
+
     echo -e "${CYAN}════════════════════════════════════════${NC}"
     echo -e "${CYAN}  Hypervisor Test Framework${NC}"
     echo -e "${CYAN}════════════════════════════════════════${NC}"
     echo ""
-    
+
     check_dependencies
     load_config
-    
+
     log "配置加载完成"
     log "组件: $COMPONENT_NAME ($COMPONENT_CRATE)"
-    
+
+    # 处理 list 命令
+    if [ "$TEST_TARGET" == "list" ]; then
+        echo ""
+        echo "所有可用的测试目标:"
+        echo ""
+        local count=$(echo "$CONFIG" | jq '.test_targets | length')
+        for ((i=0; i<count; i++)); do
+            local name=$(echo "$CONFIG" | jq -r ".test_targets[$i].name")
+            echo "  $name"
+        done
+        echo ""
+        exit 0
+    fi
+
     setup_output
-    
+
     log "输出目录: $OUTPUT_DIR"
-    
+
     if [ "$DRY_RUN" == true ]; then
         log_warn "DRY RUN 模式 - 不会执行实际操作"
     fi
-    
+
     # 临时禁用 set -e 以捕获 run_all_tests 的返回值
     set +e
     run_all_tests
     local result=$?
     set -e
-    
+
     cleanup
-    
+
     echo ""
     if [ $result -eq 0 ]; then
         log_success "所有测试通过!"
     elif [ $result -eq 2 ]; then
-        log_warn "部分测试被跳过（需要硬件）"
+        log_warn "部分测试被跳过"
     else
         log_error "部分测试失败"
     fi
-    
+
     exit $result
 }
 

@@ -1,16 +1,9 @@
 # Integration Test Workflow
-# Runs integration tests by patching component into test targets
+# Runs integration tests by calling tests.sh script
 #
-# Default test targets: axvisor, starry
 # Inputs:
-#   crate_name: Component crate name (required, auto-detected if empty)
+#   crate_name: Component crate name (auto-detected from Cargo.toml if empty)
 #   test_targets: Test targets to run (comma-separated or "all")
-#
-# Workflow:
-# 1. Checkout component (the caller repo)
-# 2. Checkout test target (axvisor/starry)
-# 3. Patch target's Cargo.toml to use component
-# 4. Run tests in target directory
 
 name: Test
 
@@ -22,305 +15,75 @@ on:
         required: false
         default: ''
         type: string
-      test_targets:
-        description: 'Test targets (comma-separated or "all")'
-        required: false
-        default: 'all'
-        type: string
 
 jobs:
-  # ========== Axvisor Tests ==========
-  axvisor:
-    name: "Axvisor: ${{ matrix.type }} - ${{ matrix.vmconfigs_name }}"
-    strategy:
-      matrix:
-        include:
-          # QEMU tests
-          - type: qemu
-            arch: aarch64
-            vmconfigs: configs/vms/arceos-aarch64-qemu-smp1.toml
-            vmconfigs_name: ArceOS
-            vmimage_name: qemu_aarch64_arceos
-          - type: qemu
-            arch: aarch64
-            vmconfigs: configs/vms/linux-aarch64-qemu-smp1.toml
-            vmconfigs_name: Linux
-            vmimage_name: qemu_aarch64_linux
-          - type: qemu
-            arch: x86_64
-            vmconfigs: configs/vms/nimbos-x86_64-qemu-smp1.toml
-            vmconfigs_name: NimbOS
-            vmimage_name: qemu_x86_64_nimbos
-          # Board tests
-          - type: board
-            board: phytiumpi
-            vmconfigs: configs/vms/arceos-aarch64-e2000-smp1.toml
-            vmconfigs_name: ArceOS
-          - type: board
-            board: phytiumpi
-            vmconfigs: configs/vms/linux-aarch64-e2000-smp1.toml
-            vmconfigs_name: Linux
-          - type: board
-            board: roc-rk3568-pc
-            vmconfigs: configs/vms/arceos-aarch64-rk3568-smp1.toml
-            vmconfigs_name: ArceOS
-          - type: board
-            board: roc-rk3568-pc
-            vmconfigs: configs/vms/linux-aarch64-rk3568-smp1.toml
-            vmconfigs_name: Linux
-      fail-fast: false
-    runs-on:
-      - self-hosted
-      - linux
-      - ${{ matrix.type == 'qemu' && 'intel' || matrix.board }}
-
+  # 检测测试目标列表
+  detect-targets:
+    name: Detect Targets
+    runs-on: self-hosted
+    outputs:
+      targets: ${{ steps.detect.outputs.targets }}
+      has-targets: ${{ steps.detect.outputs.has-targets }}
     steps:
-      - name: Filter test targets
-        id: filter
-        run: |
-          INPUT="${{ inputs.test_targets }}"
-          if [ "$INPUT" = "all" ] || [ -z "$INPUT" ] || echo ",$INPUT," | grep -q ",axvisor,"; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_run=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Clean up workspace
-        if: steps.filter.outputs.should_run == 'true'
-        run: |
-          [ -d .git ] && git submodule deinit -f . || true
-          [ -d .git/modules ] && rm -rf .git/modules || true
-          [ -d .git ] && git clean -ffdx || true
-
       - name: Checkout component
-        if: steps.filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
-        with:
-          path: component
 
-      - name: Checkout axvisor
-        if: steps.filter.outputs.should_run == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: arceos-hypervisor/axvisor
-          ref: master
-          path: axvisor
-          submodules: recursive
-
-      - name: Get component crate name
-        if: steps.filter.outputs.should_run == 'true'
-        id: component
-        working-directory: component
+      - name: Download tests.sh
         run: |
-          if [ -n "${{ inputs.crate_name }}" ]; then
-            CRATE_NAME="${{ inputs.crate_name }}"
+          curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/tests.sh -o tests.sh
+          chmod +x tests.sh
+
+      - name: Detect test targets
+        id: detect
+        run: |
+          TARGETS=$(./tests.sh --list-auto)
+          echo "targets=$TARGETS" >> $GITHUB_OUTPUT
+          if [ "$TARGETS" = "[]" ]; then
+            echo "has-targets=false" >> $GITHUB_OUTPUT
           else
-            CRATE_NAME=$(cargo tree 2>/dev/null | head -1 | cut -d' ' -f1 || basename $(pwd))
+            echo "has-targets=true" >> $GITHUB_OUTPUT
           fi
-          echo "crate_name=$CRATE_NAME" >> $GITHUB_OUTPUT
+          echo "Detected targets: $TARGETS"
 
-      - name: Apply patch to Cargo.toml
-        if: steps.filter.outputs.should_run == 'true'
-        working-directory: axvisor
-        run: |
-          CRATE_NAME="${{ steps.component.outputs.crate_name }}"
-          PATCH_LINE="$CRATE_NAME = { path = \"../component\" }"
-          # Check if [patch.crates-io] already exists
-          if grep -q '^\[patch.crates-io\]' Cargo.toml; then
-            sed -i "/^\[patch.crates-io\]/a $PATCH_LINE" Cargo.toml
-          else
-            echo "" >> Cargo.toml
-            echo "[patch.crates-io]" >> Cargo.toml
-            echo "$PATCH_LINE" >> Cargo.toml
-          fi
-          echo "Applied patch:"
-          tail -10 Cargo.toml
-
-      - name: Install dependencies
-        if: steps.filter.outputs.should_run == 'true'
-        run: cargo +stable install ostool --version ^0.8
-
-      - name: Download images and patch vm configs (QEMU only)
-        if: steps.filter.outputs.should_run == 'true' && matrix.type == 'qemu'
-        working-directory: axvisor
-        run: |
-          ls -lha .
-          ls -lha modules/
-
-          IMAGE_DIR="/tmp/.axvisor-images"
-          IFS=',' read -ra CONFIGS <<< "${{ matrix.vmconfigs }}"
-          IFS=',' read -ra IMAGES <<< "${{ matrix.vmimage_name }}"
-          for i in "${!CONFIGS[@]}"; do
-            img="${IMAGES[$i]}"
-            img=$(echo "$img" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            config="${CONFIGS[$i]}"
-            config=$(echo "$config" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            cargo xtask image download $img
-            img_name="qemu-${{ matrix.arch }}"
-            image_location=$(sed -n 's/^image_location[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config")
-
-            case "$image_location" in
-            "fs")
-              echo "Filesystem storage mode - no config update needed"
-              ;;
-            "memory")
-              sed -i 's|^kernel_path[[:space:]]*=.*|kernel_path = "'"${IMAGE_DIR}"'/'"$img"'/'"$img_name"'"|' "$config"
-              echo "Memory storage mode - updating kernel_path"
-              ;;
-            *)
-              echo "Unknown image_location: $image_location"
-              exit 1
-              ;;
-            esac
-
-            ROOTFS_IMG_PATH="${IMAGE_DIR}/$img/rootfs.img"
-
-            if [ -f "${ROOTFS_IMG_PATH}" ]; then
-              echo "Found rootfs.img, patching qemu-${{ matrix.arch }}.toml file..."
-              sed -i 's|file=${workspaceFolder}/tmp/rootfs.img|file='"${ROOTFS_IMG_PATH}"'|' ".github/workflows/qemu-${{ matrix.arch }}.toml"
-              echo "Rootfs setup completed"
-            else
-              echo "No rootfs.img found, removing rootfs device configuration from qemu-${{ matrix.arch }}.toml..."
-              sed -i '/-device/,/virtio-blk-device,drive=disk0/d' ".github/workflows/qemu-${{ matrix.arch }}.toml"
-              sed -i '/-drive/,/id=disk0,if=none,format=raw,file=${workspaceFolder}\/tmp\/rootfs.img/d' ".github/workflows/qemu-${{ matrix.arch }}.toml"
-              sed -i 's/root=\/dev\/vda rw //' ".github/workflows/qemu-${{ matrix.arch }}.toml"
-              echo "Rootfs device configuration removed"
-            fi
-          done
-
-      - name: Run QEMU tests
-        if: steps.filter.outputs.should_run == 'true' && matrix.type == 'qemu'
-        working-directory: axvisor
-        run: |
-          export RUST_LOG=debug
-          cargo xtask qemu \
-            --build-config configs/board/qemu-${{ matrix.arch }}.toml \
-            --qemu-config .github/workflows/qemu-${{ matrix.arch }}.toml \
-            --vmconfigs ${{ matrix.vmconfigs }}
-
-      - name: Run Board tests
-        if: steps.filter.outputs.should_run == 'true' && matrix.type == 'board'
-        working-directory: axvisor
-        run: |
-          echo $BOARD_POWER_RESET
-          export RUST_LOG=debug
-          cargo xtask uboot \
-            --build-config configs/board/${{ matrix.board }}.toml \
-            --uboot-config .github/workflows/uboot.toml \
-            --vmconfigs ${{ matrix.vmconfigs }} \
-            --bin-dir /home/runner/tftp
-
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.filter.outputs.should_run }}" = "true" ]; then
-            echo "✅ Axvisor test completed"
-          else
-            echo "⏭️ Axvisor test skipped"
-          fi
-
-  # ========== Starry Tests ==========
-  starry:
-    name: "Starry: ${{ matrix.arch }}"
+  # 运行测试 (matrix 并行)
+  test:
+    name: Test ${{ matrix.target }}
+    needs: detect-targets
+    if: needs.detect-targets.outputs.has-targets == 'true'
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
-        arch: [riscv64, loongarch64, aarch64, x86_64]
-    runs-on: ubuntu-latest
-
+        target: ${{ fromJson(needs.detect-targets.outputs.targets) }}
     steps:
-      - name: Filter test targets
-        id: filter
-        run: |
-          INPUT="${{ inputs.test_targets }}"
-          if [ "$INPUT" = "all" ] || [ -z "$INPUT" ] || echo ",$INPUT," | grep -q ",starry,"; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_run=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Checkout component
-        if: steps.filter.outputs.should_run == 'true'
         uses: actions/checkout@v4
-        with:
-          path: component
 
-      - name: Checkout StarryOS
-        if: steps.filter.outputs.should_run == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: Starry-OS/StarryOS
-          ref: main
-          path: starry
-          submodules: recursive
-
-      - name: Get component crate name
-        if: steps.filter.outputs.should_run == 'true'
-        id: component
-        working-directory: component
+      - name: Download tests.sh
         run: |
-          if [ -n "${{ inputs.crate_name }}" ]; then
-            CRATE_NAME="${{ inputs.crate_name }}"
-          else
-            CRATE_NAME=$(cargo tree 2>/dev/null | head -1 | cut -d' ' -f1 || basename $(pwd))
-          fi
-          echo "crate_name=$CRATE_NAME" >> $GITHUB_OUTPUT
+          curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/tests.sh -o tests.sh
+          chmod +x tests.sh
 
-      - name: Apply patch to Cargo.toml
-        if: steps.filter.outputs.should_run == 'true'
-        working-directory: starry
+      - name: Run test for ${{ matrix.target }}
         run: |
-          CRATE_NAME="${{ steps.component.outputs.crate_name }}"
-          PATCH_LINE="$CRATE_NAME = { path = \"../component\" }"
-          # Check if [patch.crates-io] already exists
-          if grep -q '^\[patch.crates-io\]' Cargo.toml; then
-            sed -i "/^\[patch.crates-io\]/a $PATCH_LINE" Cargo.toml
-          else
-            echo "" >> Cargo.toml
-            echo "[patch.crates-io]" >> Cargo.toml
-            echo "$PATCH_LINE" >> Cargo.toml
-          fi
-          echo "Applied patch:"
-          tail -10 Cargo.toml
+          ./tests.sh -t ${{ matrix.target }} --dry-run
 
-      - uses: Swatinem/rust-cache@v2
-        if: steps.filter.outputs.should_run == 'true'
-        with:
-          shared-key: test
-          cache-targets: false
-
-      - uses: arceos-org/setup-musl@v1
-        if: steps.filter.outputs.should_run == 'true'
-        with:
-          arch: ${{ matrix.arch }}
-
-      - name: Build
-        if: steps.filter.outputs.should_run == 'true'
-        working-directory: starry
-        run: make ARCH=${{ matrix.arch }} build
-
-      - name: Setup QEMU
-        if: steps.filter.outputs.should_run == 'true'
-        uses: arceos-org/setup-qemu@v1
-        with:
-          version: 10.1.0
-          arch_list: ${{ matrix.arch }}
-
-      - name: Prepare rootfs
-        if: steps.filter.outputs.should_run == 'true'
-        working-directory: starry
-        run: make ARCH=${{ matrix.arch }} img
-
-      - name: Test
-        if: steps.filter.outputs.should_run == 'true'
-        working-directory: starry
-        run: scripts/ci-test.py ${{ matrix.arch }}
-
-      - name: Summary
+      - name: Upload test results
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.target }}
+          path: test-results/
+          retention-days: 7
+
+  # 无测试目标时的提示
+  no-tests:
+    name: No Tests Available
+    needs: detect-targets
+    if: needs.detect-targets.outputs.has-targets == 'false'
+    runs-on: self-hosted
+    steps:
+      - name: No tests to run
         run: |
-          if [ "${{ steps.filter.outputs.should_run }}" = "true" ]; then
-            echo "✅ Starry test completed"
-          else
-            echo "⏭️ Starry test skipped"
-          fi
+          echo "No test targets detected for this component."
+          echo "Check rust-toolchain.toml or component configuration."
