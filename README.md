@@ -509,6 +509,185 @@ flowchart TB
 | `should_proceed` | 是否继续执行 deploy/release |
 | `is_prerelease` | 是否为预发布标签 |
 
+## Sync - 代码同步（Git Subtree）
+
+`sync.yml` 工作流和 `sync.sh` 脚本使用 **git subtree** 在 monorepo 和组件仓库之间进行双向同步，完整保留 commit 历史。
+
+### 设计
+
+tgoskits 使用 git subtree 管理所有组件，这意味着：
+- ✅ 所有组件代码都直接在主仓库中
+- ✅ 完整保留了所有 commit 历史
+- ✅ 可以选择性地将修改推送回原仓库
+- ✅ 可以从原仓库拉取更新
+
+**同步方向：**
+
+1. **Monorepo → 组件仓库**：使用 `git subtree push` 将 monorepo 中的修改推送到组件仓库
+2. **组件仓库 → Monorepo**：使用 `git subtree pull` 从组件仓库拉取更新到 monorepo
+
+**执行过程：**
+
+```mermaid
+flowchart TB
+    subgraph "Push to Components (git subtree push)"
+        A[Commit in Monorepo] --> B[Detect Changed Components]
+        B --> C[For Each Component]
+        C --> D[git subtree push --prefix=dir repo branch]
+        D --> E[Push to Component Repo]
+    end
+    
+    subgraph "Pull from Components (git subtree pull)"
+        F[Component Updated] --> G[In Monorepo]
+        G --> H[git subtree pull --prefix=dir repo branch]
+        H --> I[Merge & Commit]
+        I --> J[Push to Monorepo]
+    end
+```
+
+**Git Subtree 命令：**
+
+```bash
+# 从 monorepo 推送到组件仓库
+git subtree push --prefix=<component_dir> <component_repo_url> <branch>
+
+# 从组件仓库拉取更新到 monorepo
+git subtree pull --prefix=<component_dir> <component_repo_url> <branch>
+```
+
+**输入参数：**
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `sync_direction` | 同步方向：push-to-components 或 pull-from-components | push-to-components |
+| `component_name` | 组件名称（pull 时必需） | - |
+| `component_branch` | 组件分支 | 自动检测（main/master/dev） |
+| `dry_run` | 仅显示将要同步的内容 | false |
+
+**Secrets：**
+
+| Secret | 说明 |
+|--------|------|
+| `SYNC_TOKEN` | 具有仓库写入权限的 GitHub Token |
+
+### 使用 - Monorepo (tgoskits)
+
+在 monorepo 中创建 `.github/workflows/sync.yml`：
+
+```yaml
+name: Sync
+
+on:
+  workflow_run:
+    workflows: ["Check", "Test"]
+    types:
+      - completed
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    uses: arceos-hypervisor/axci/.github/workflows/sync.yml@dev
+    with:
+      sync_direction: 'push-to-components'
+    secrets:
+      SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+```
+
+**本地同步脚本：**
+
+```bash
+# 推送所有修改的组件到各自的仓库
+./sync.sh --push
+
+# 推送特定组件
+./sync.sh --push --component axvcpu
+
+# 从组件仓库拉取更新
+./sync.sh --pull --component axvcpu
+
+# 仅显示将要同步的内容（不实际执行）
+./sync.sh --push --dry-run
+```
+
+**手动 Git Subtree 命令：**
+
+```bash
+# 推送 arceos 组件到原仓库的 dev 分支
+git subtree push --prefix=arceos https://github.com/arceos-org/arceos.git dev
+
+# 从 arceos 仓库拉取更新
+git subtree pull --prefix=arceos https://github.com/arceos-org/arceos.git dev
+
+# 推送 axvcpu 组件
+git subtree push --prefix=axvcpu https://github.com/arceos-hypervisor/axvcpu.git main
+
+# 从 axvcpu 仓库拉取更新
+git subtree pull --prefix=axvcpu https://github.com/arceos-hypervisor/axvcpu.git main
+```
+
+### 使用 - 组件仓库
+
+**重要说明：** Git subtree 同步必须在 **monorepo 端** 执行，不能从组件仓库端执行。组件仓库**不需要**任何特殊的同步脚本或工作流。
+
+要从组件仓库同步修改，在 tgoskits monorepo 中执行：
+
+```bash
+# 从组件仓库 → Monorepo
+cd /path/to/tgoskits
+./sync.sh --pull --component axvcpu
+
+# 从 Monorepo → 组件仓库
+./sync.sh --push --component axvcpu
+```
+
+### 配置要求
+
+1. **SYNC_TOKEN 配置**
+   - 在仓库设置中添加 `SYNC_TOKEN` secret
+   - Token 需要有 `repo` 权限（用于推送代码）
+   - 可以使用 GitHub App 或 Personal Access Token
+
+2. **Cargo.toml 配置**
+   - 组件的 Cargo.toml 中需要包含 `repository` 字段
+   - 示例：`repository = "https://github.com/arceos-hypervisor/axvcpu"`
+
+3. **分支策略**
+   - 建议使用相同的分支名称（如 main, dev）
+   - 确保目标分支在目标仓库中存在
+
+### 常见问题
+
+**Q: 为什么不能从组件仓库端执行同步？**
+
+A: Git subtree 在 monorepo 中维护子树结构。所有 subtree 操作（push/pull）都必须在包含该子树的仓库中执行。
+
+**Q: 如何解决冲突？**
+
+A: 如果 `git subtree pull` 产生冲突，需要手动解决：
+```bash
+# 拉取时产生冲突
+git subtree pull --prefix=axvcpu https://github.com/.../axvcpu.git main
+
+# 查看冲突文件
+git status
+
+# 手动解决冲突
+vim <conflicted_file>
+
+# 提交解决
+git add .
+git commit
+```
+
+**Q: 如何查看组件的 commit 历史？**
+
+A: 使用 git log 查看特定目录的历史：
+```bash
+git log --oneline -- axvcpu/
+```
+
 ## License
 
 Apache-2.0
