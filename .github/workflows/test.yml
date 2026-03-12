@@ -75,13 +75,37 @@ jobs:
           ref: ${{ steps.axci_ref.outputs.ref }}
           path: axci-rules
 
+      - name: Install Rust for dependency-aware detection
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: ''
+        continue-on-error: true
+
+      - name: Build axci-affected engine
+        id: build_axci_affected
+        working-directory: axci-rules/axci-affected
+        run: cargo build --release
+        continue-on-error: true
+
+      - name: Test axci-affected engine
+        if: steps.build_axci_affected.outcome == 'success'
+        working-directory: axci-rules/axci-affected
+        run: cargo test
+
       - name: Build dynamic matrix from test_targets input
         id: matrix
         working-directory: component
         run: |
           INPUT="${{ inputs.test_targets }}"
           BASE_REF="${{ inputs.base_ref }}"
+          # 规则文件优先级：
+          # 1) 组件仓库本地规则: .github/axci-test-target-rules.json
+          # 2) axci 仓库自带默认规则: ../axci-rules/configs/test-target-rules.json
           RULES_FILE="../axci-rules/configs/test-target-rules.json"
+          if [ -f ".github/axci-test-target-rules.json" ]; then
+            RULES_FILE=".github/axci-test-target-rules.json"
+          fi
+          AFFECTED_SCRIPT="../axci-rules/scripts/affected_crates.sh"
           TARGETS_JSON="[]"
           AUTO_REASON="manual_input"
 
@@ -97,6 +121,20 @@ jobs:
               (.non_code.files | any(. as $f | $path == $f))
             ' "$RULES_FILE" > /dev/null 2>&1
           }
+
+          # 依赖感知：若规则含 run_all_crates/crate_rules 且脚本可用，计算 changed/affected crates
+          CHANGED_CRATES_JSON='[]'
+          AFFECTED_CRATES_JSON='[]'
+          FILE_TO_CRATE_JSON='{}'
+          if [ -f "$AFFECTED_SCRIPT" ] && jq -e '.run_all_crates != null or .crate_rules != null or .crate_path_rules != null' "$RULES_FILE" >/dev/null 2>&1; then
+            CRATES_OUTPUT="$("$AFFECTED_SCRIPT" . "$BASE_REF" 2>/dev/null || true)"
+            if [ -n "$CRATES_OUTPUT" ] && echo "$CRATES_OUTPUT" | jq -e '.changed_crates != null' >/dev/null 2>&1; then
+              CHANGED_CRATES_JSON=$(echo "$CRATES_OUTPUT" | jq -c '.changed_crates')
+              AFFECTED_CRATES_JSON=$(echo "$CRATES_OUTPUT" | jq -c '.affected_crates')
+              FILE_TO_CRATE_JSON=$(echo "$CRATES_OUTPUT" | jq -c '.file_to_crate // {}')
+              echo "Dependency-aware: changed_crates=$CHANGED_CRATES_JSON affected_crates=$AFFECTED_CRATES_JSON"
+            fi
+          fi
 
           if [ "$INPUT" = "auto" ] || [ "$INPUT" = "__auto__" ]; then
             if [ ! -f "$RULES_FILE" ]; then
@@ -124,14 +162,32 @@ jobs:
                   TARGETS_JSON='[]'
                   AUTO_REASON="no_changes_skip"
                 else
+                  TARGETS_JSON=""
+                  if [ -x "../axci-rules/axci-affected/target/release/axci-affected" ]; then
+                    ENGINE_OUT=$(../axci-rules/axci-affected/target/release/axci-affected . "$BASE_REF" "$RULES_FILE" 2>/dev/null) || true
+                    if [ -n "$ENGINE_OUT" ] && echo "$ENGINE_OUT" | jq -e '.skip_all != null and .targets != null' >/dev/null 2>&1; then
+                      AUTO_REASON="engine"
+                      if [ "$(echo "$ENGINE_OUT" | jq -r '.skip_all')" = "true" ]; then
+                        TARGETS_JSON='[]'
+                      else
+                        TARGETS_JSON=$(echo "$ENGINE_OUT" | jq -c '.targets')
+                      fi
+                    fi
+                  fi
+                  if [ -z "$TARGETS_JSON" ]; then
                   mapfile -t RUN_ALL_PATTERNS < <(jq -r '.run_all_patterns[]' "$RULES_FILE")
+                  mapfile -t RUN_ALL_EXCLUDE_PATTERNS < <(jq -r '.run_all_exclude_patterns[]?' "$RULES_FILE")
                   mapfile -t RULE_ROWS < <(jq -r '.selection_rules[] | [.id, (.patterns | join("\u001f")), (.targets | join("\u001f"))] | @tsv' "$RULES_FILE")
                   mapfile -t TARGET_ORDER < <(jq -r '.target_order[]' "$RULES_FILE")
+                  RUN_ALL_CRATES_JSON=$(jq -c '.run_all_crates // []' "$RULES_FILE")
+                  CRATE_RULES_JSON=$(jq -c '.crate_rules // []' "$RULES_FILE")
+                  CRATE_PATH_RULES_JSON=$(jq -c '.crate_path_rules // []' "$RULES_FILE")
 
                   HAS_CODE_CHANGE=false
                   NEEDS_ALL=false
                   declare -A SELECTED=()
 
+                  # 路径规则
                   while IFS= read -r f; do
                     [ -z "$f" ] && continue
 
@@ -141,7 +197,16 @@ jobs:
 
                     for p in "${RUN_ALL_PATTERNS[@]}"; do
                       if [[ "$f" == $p ]]; then
-                        NEEDS_ALL=true
+                        EXCLUDED=false
+                        for ex in "${RUN_ALL_EXCLUDE_PATTERNS[@]}"; do
+                          if [[ "$f" == $ex ]]; then
+                            EXCLUDED=true
+                            break
+                          fi
+                        done
+                        if [ "$EXCLUDED" = "false" ]; then
+                          NEEDS_ALL=true
+                        fi
                         break
                       fi
                     done
@@ -165,6 +230,67 @@ jobs:
                     done
                   done <<< "$CHANGED_FILES"
 
+                  # 依赖感知：run_all_crates（仅直接修改）
+                  for crate in $(echo "$RUN_ALL_CRATES_JSON" | jq -r '.[]'); do
+                    if echo "$CHANGED_CRATES_JSON" | jq -e --arg c "$crate" 'index($c) != null' >/dev/null 2>&1; then
+                      NEEDS_ALL=true
+                      break
+                    fi
+                  done
+
+                  # 依赖感知：crate_rules（根据 direct_only 用 changed 或 affected）
+                  while IFS= read -r rule; do
+                    [ -z "$rule" ] && continue
+                    crates_json=$(echo "$rule" | jq -c '.crates')
+                    direct_only=$(echo "$rule" | jq -r '.direct_only // false')
+                    targets_json=$(echo "$rule" | jq -c '.targets')
+                    check_json="$AFFECTED_CRATES_JSON"
+                    [ "$direct_only" = "true" ] && check_json="$CHANGED_CRATES_JSON"
+                    for crate in $(echo "$crates_json" | jq -r '.[]'); do
+                      if echo "$check_json" | jq -e --arg c "$crate" 'index($c) != null' >/dev/null 2>&1; then
+                        for t in $(echo "$targets_json" | jq -r '.[]'); do
+                          SELECTED["$t"]=1
+                        done
+                        break
+                      fi
+                    done
+                  done < <(echo "$CRATE_RULES_JSON" | jq -c '.[]?')
+
+                  # 依赖感知：crate_path_rules（crate + 路径 联合规则）
+                  while IFS= read -r f; do
+                    [ -z "$f" ] && continue
+                    file_crate=$(echo "$FILE_TO_CRATE_JSON" | jq -r --arg f "$f" '.[$f] // empty')
+                    [ -z "$file_crate" ] && continue
+                    while IFS= read -r rule; do
+                      [ -z "$rule" ] && continue
+                      crates_json=$(echo "$rule" | jq -c '.crates // []')
+                      direct_only=$(echo "$rule" | jq -r '.direct_only // false')
+                      targets_json=$(echo "$rule" | jq -c '.targets // []')
+                      path_patterns_json=$(echo "$rule" | jq -c '.path_patterns // []')
+                      check_json="$AFFECTED_CRATES_JSON"
+                      [ "$direct_only" = "true" ] && check_json="$CHANGED_CRATES_JSON"
+                      if ! echo "$check_json" | jq -e --arg c "$file_crate" 'index($c) != null' >/dev/null 2>&1; then
+                        continue
+                      fi
+                      if ! echo "$crates_json" | jq -e --arg c "$file_crate" 'index($c) != null' >/dev/null 2>&1; then
+                        continue
+                      fi
+                      matched_path=false
+                      for p in $(echo "$path_patterns_json" | jq -r '.[]'); do
+                        if [[ "$f" == $p ]]; then
+                          matched_path=true
+                          break
+                        fi
+                      done
+                      if [ "$matched_path" = "true" ]; then
+                        for t in $(echo "$targets_json" | jq -r '.[]'); do
+                          SELECTED["$t"]=1
+                        done
+                        break
+                      fi
+                    done < <(echo "$CRATE_PATH_RULES_JSON" | jq -c '.[]?')
+                  done <<< "$CHANGED_FILES"
+
                   if [ "$HAS_CODE_CHANGE" = false ]; then
                     TARGETS_JSON='[]'
                     AUTO_REASON="non_code_only_skip"
@@ -186,6 +312,7 @@ jobs:
                       TARGETS_JSON=$(printf '%s\n' "${ORDERED_TARGETS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
                       AUTO_REASON="rule_selected"
                     fi
+                  fi
                   fi
                 fi
               fi

@@ -618,6 +618,20 @@ load_test_target_rules() {
         return 0
     fi
 
+    # 规则文件优先级：
+    # 1) 组件仓库本地规则: $COMPONENT_DIR/.github/axci-test-target-rules.json
+    # 2) 默认规则: axci 仓库自身的 configs/test-target-rules.json
+    local component_rules=""
+    if [ -n "$COMPONENT_DIR" ]; then
+        component_rules="$COMPONENT_DIR/.github/axci-test-target-rules.json"
+    else
+        component_rules=".github/axci-test-target-rules.json"
+    fi
+
+    if [ -f "$component_rules" ]; then
+        TEST_TARGET_RULES_FILE="$component_rules"
+    fi
+
     if [ ! -f "$TEST_TARGET_RULES_FILE" ]; then
         log_warn "自动目标选择规则文件不存在: $TEST_TARGET_RULES_FILE，回退为 all"
         return 1
@@ -678,6 +692,67 @@ auto_detect_test_targets() {
         return
     }
 
+    # 优先使用 Rust 引擎 axci-affected（若已编译）
+    local axci_root
+    axci_root="$(cd "$(dirname "$0")" && pwd)"
+    local affected_bin="$axci_root/axci-affected/target/release/axci-affected"
+    if [ -x "$affected_bin" ]; then
+        local engine_out
+        engine_out="$("$affected_bin" "$COMPONENT_DIR" "$BASE_REF" "$TEST_TARGET_RULES_FILE" 2>/dev/null)" || true
+        if [ -n "$engine_out" ] && echo "$engine_out" | jq -e '.skip_all != null and .targets != null' >/dev/null 2>&1; then
+            local skip_all
+            skip_all="$(echo "$engine_out" | jq -r '.skip_all')"
+            if [ "$skip_all" = "true" ]; then
+                log "自动目标选择 (axci-affected): 跳过所有测试"
+                TEST_TARGET="__skip_all__"
+                AUTO_DETECTED_TARGETS=""
+                return
+            fi
+            local targets_arr=()
+            while IFS= read -r t; do [ -n "$t" ] && targets_arr+=("$t"); done < <(echo "$engine_out" | jq -r '.targets[]?' 2>/dev/null)
+            if [ ${#targets_arr[@]} -eq 0 ]; then
+                log_warn "自动目标选择 (axci-affected): 无目标，回退 all"
+                TEST_TARGET="all"
+                AUTO_DETECTED_TARGETS=""
+                return
+            fi
+            log "自动目标选择 (axci-affected): ${targets_arr[*]}"
+            TEST_TARGET="__auto__"
+            AUTO_DETECTED_TARGETS="${targets_arr[*]}"
+            return
+        fi
+    fi
+
+    # 依赖感知：可选地通过 cargo metadata 计算 changed/affected crates
+    local changed_crates_json="[]"
+    local affected_crates_json="[]"
+    local file_to_crate_json="{}"
+    local run_all_crates_json="[]"
+    local crate_rules_json="[]"
+    local crate_path_rules_json="[]"
+    local affected_script=""
+
+    affected_script="$(dirname "$0")/scripts/affected_crates.sh"
+    if [ -f "$affected_script" ]; then
+        # 解析规则中的 crate 相关配置（无则为空数组）
+        run_all_crates_json="$(echo "$TARGET_RULES_JSON" | jq -c '.run_all_crates // []' 2>/dev/null || echo '[]')"
+        crate_rules_json="$(echo "$TARGET_RULES_JSON" | jq -c '.crate_rules // []' 2>/dev/null || echo '[]')"
+        crate_path_rules_json="$(echo "$TARGET_RULES_JSON" | jq -c '.crate_path_rules // []' 2>/dev/null || echo '[]')"
+        if { echo "$run_all_crates_json" | jq -e '. | type == "array"' >/dev/null 2>&1; } || \
+           { echo "$crate_rules_json" | jq -e '. | type == "array"' >/dev/null 2>&1; } || \
+           { echo "$crate_path_rules_json" | jq -e '. | type == "array"' >/dev/null 2>&1; }; then
+            # 若组件仓库是 Rust workspace 且安装了 cargo，则脚本会返回 crate 影响范围；否则返回空数组
+            local crates_output
+            crates_output="$("$affected_script" "$COMPONENT_DIR" "$BASE_REF" 2>/dev/null || true)"
+            if [ -n "$crates_output" ] && echo "$crates_output" | jq -e '.changed_crates != null and .affected_crates != null' >/dev/null 2>&1; then
+                changed_crates_json="$(echo "$crates_output" | jq -c '.changed_crates')"
+                affected_crates_json="$(echo "$crates_output" | jq -c '.affected_crates')"
+                file_to_crate_json="$(echo "$crates_output" | jq -c '.file_to_crate // {}')"
+                log_debug "依赖感知: changed_crates=$changed_crates_json affected_crates=$affected_crates_json"
+            fi
+        fi
+    fi
+
     local changed_files
     changed_files="$(get_changed_files_for_auto_target)" || {
         log_warn "自动目标选择失败，回退为 all"
@@ -724,6 +799,8 @@ auto_detect_test_targets() {
 
     local run_all_patterns=()
     mapfile -t run_all_patterns < <(echo "$TARGET_RULES_JSON" | jq -r '.run_all_patterns[]')
+    local run_all_exclude_patterns=()
+    mapfile -t run_all_exclude_patterns < <(echo "$TARGET_RULES_JSON" | jq -r '.run_all_exclude_patterns[]?')
 
     local selection_rule_rows=()
     mapfile -t selection_rule_rows < <(echo "$TARGET_RULES_JSON" | jq -r '.selection_rules[] | [.id, (.patterns | join("\u001f")), (.targets | join("\u001f"))] | @tsv')
@@ -739,8 +816,18 @@ auto_detect_test_targets() {
 
         for run_all_pattern in "${run_all_patterns[@]}"; do
             if [[ "$f" == $run_all_pattern ]]; then
-                needs_all=true
-                rule_hits+=("run_all:$f")
+                local excluded=false
+                local ex_pattern
+                for ex_pattern in "${run_all_exclude_patterns[@]}"; do
+                    if [[ "$f" == $ex_pattern ]]; then
+                        excluded=true
+                        break
+                    fi
+                done
+                if [ "$excluded" = false ]; then
+                    needs_all=true
+                    rule_hits+=("run_all:$f")
+                fi
                 break
             fi
         done
@@ -776,11 +863,99 @@ auto_detect_test_targets() {
         return
     fi
 
+    # 依赖感知：run_all_crates 命中则全量
+    if [ "$run_all_crates_json" != "[]" ] && [ "$changed_crates_json" != "[]" ]; then
+        if echo "$run_all_crates_json" | jq -e --argjson changed "$changed_crates_json" '
+          any(.[]; $changed | index(.))' >/dev/null 2>&1; then
+            needs_all=true
+            rule_hits+=("run_all_crates")
+        fi
+    fi
+
     if [ "$needs_all" = true ]; then
         TEST_TARGET="all"
         log "自动目标选择: 命中全量规则，运行 all"
         log_debug "  rules: ${rule_hits[*]}"
         return
+    fi
+
+    # 依赖感知：根据 crate_rules 为目标加分（changed_crates / affected_crates）
+    if [ "$crate_rules_json" != "[]" ]; then
+        while IFS= read -r rule; do
+            [ -z "$rule" ] && continue
+            local crates_json
+            local direct_only
+            local targets_json
+            local check_json
+            crates_json="$(echo "$rule" | jq -c '.crates // []')"
+            direct_only="$(echo "$rule" | jq -r '.direct_only // false')"
+            targets_json="$(echo "$rule" | jq -c '.targets // []')"
+            if [ "$direct_only" = "true" ]; then
+                check_json="$changed_crates_json"
+            else
+                check_json="$affected_crates_json"
+            fi
+            for crate in $(echo "$crates_json" | jq -r '.[]'); do
+                if [ -n "$check_json" ] && echo "$check_json" | jq -e --arg c "$crate" 'index($c) != null' >/dev/null 2>&1; then
+                    rule_hits+=("crate_rule:$crate")
+                    for t in $(echo "$targets_json" | jq -r '.[]'); do
+                        selected_target_map["$t"]=1
+                    done
+                    break
+                fi
+            done
+        done < <(echo "$crate_rules_json" | jq -c '.[]?')
+    fi
+
+    # 依赖感知：crate_path_rules（crate + 路径 联合规则）
+    if [ "$crate_path_rules_json" != "[]" ]; then
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            local file_crate
+            file_crate="$(echo "$file_to_crate_json" | jq -r --arg f "$f" '.[$f] // empty' 2>/dev/null || true)"
+            [ -z "$file_crate" ] && continue
+
+            while IFS= read -r rule; do
+                [ -z "$rule" ] && continue
+                local crates_json
+                local direct_only
+                local targets_json
+                local path_patterns_json
+                local check_json
+                crates_json="$(echo "$rule" | jq -c '.crates // []')"
+                direct_only="$(echo "$rule" | jq -r '.direct_only // false')"
+                targets_json="$(echo "$rule" | jq -c '.targets // []')"
+                path_patterns_json="$(echo "$rule" | jq -c '.path_patterns // []')"
+                if [ "$direct_only" = "true" ]; then
+                    check_json="$changed_crates_json"
+                else
+                    check_json="$affected_crates_json"
+                fi
+
+                if ! echo "$check_json" | jq -e --arg c "$file_crate" 'index($c) != null' >/dev/null 2>&1; then
+                    continue
+                fi
+                if ! echo "$crates_json" | jq -e --arg c "$file_crate" 'index($c) != null' >/dev/null 2>&1; then
+                    continue
+                fi
+
+                local matched_path=false
+                local p
+                for p in $(echo "$path_patterns_json" | jq -r '.[]'); do
+                    if [[ "$f" == $p ]]; then
+                        matched_path=true
+                        break
+                    fi
+                done
+                if [ "$matched_path" = true ]; then
+                    rule_hits+=("crate_path_rule:$file_crate:$f")
+                    for t in $(echo "$targets_json" | jq -r '.[]'); do
+                        selected_target_map["$t"]=1
+                    done
+                    break
+                fi
+            done < <(echo "$crate_path_rules_json" | jq -c '.[]?')
+        done <<< "$changed_files"
     fi
 
     local targets=()

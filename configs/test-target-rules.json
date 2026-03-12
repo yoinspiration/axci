@@ -24,7 +24,12 @@
     "rust-toolchain.toml",
     "tests.sh",
     "check.sh",
-    ".github/workflows/*"
+    ".github/workflows/*",
+    "xtask/*",
+    "kernel/*"
+  ],
+  "run_all_exclude_patterns": [
+    "kernel/src/hal/arch/*"
   ],
   "selection_rules": [
     {
@@ -82,5 +87,48 @@
     "axvisor-board-phytiumpi-linux",
     "axvisor-board-roc-rk3568-pc-arceos",
     "axvisor-board-roc-rk3568-pc-linux"
+  ],
+  "_comment_dependency_aware": "Optional. run_all_crates: direct change triggers all. crate_rules: affected crate -> targets (use direct_only:true to match only changed_crates).",
+  "run_all_crates": [
+    "axruntime",
+    "axconfig"
+  ],
+  "crate_rules": [
+    {
+      "id": "crate_x86_platform",
+      "crates": ["axplat-x86-qemu-q35"],
+      "targets": ["axvisor-qemu-x86_64-nimbos"],
+      "direct_only": false
+    },
+    {
+      "id": "crate_axfs",
+      "crates": ["axfs"],
+      "targets": ["axvisor-qemu-aarch64-arceos", "axvisor-qemu-aarch64-linux", "axvisor-board-phytiumpi-arceos", "axvisor-board-phytiumpi-linux", "axvisor-board-roc-rk3568-pc-arceos", "axvisor-board-roc-rk3568-pc-linux"],
+      "direct_only": false
+    }
+  ],
+  "_comment_crate_path": "crate_path_rules: when a changed file belongs to one of the crates AND path matches path_patterns, add targets (enables driver phytium/rockchip/generic granularity).",
+  "crate_path_rules": [
+    {
+      "id": "driver_phytium",
+      "crates": ["driver"],
+      "path_patterns": ["*phytium*", "*e2000*"],
+      "targets": ["axvisor-board-phytiumpi-arceos", "axvisor-board-phytiumpi-linux"],
+      "direct_only": false
+    },
+    {
+      "id": "driver_rockchip",
+      "crates": ["driver"],
+      "path_patterns": ["*rk3568*", "*rockchip*"],
+      "targets": ["axvisor-board-roc-rk3568-pc-arceos", "axvisor-board-roc-rk3568-pc-linux"],
+      "direct_only": false
+    },
+    {
+      "id": "driver_generic",
+      "crates": ["driver"],
+      "path_patterns": ["*"],
+      "targets": ["axvisor-board-phytiumpi-arceos", "axvisor-board-phytiumpi-linux", "axvisor-board-roc-rk3568-pc-arceos", "axvisor-board-roc-rk3568-pc-linux"],
+      "direct_only": false
+    }
   ]
 }
