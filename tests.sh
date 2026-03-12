@@ -5,7 +5,7 @@
 #
 # 用法:
 #   ./tests.sh                           # 运行所有测试
-#   ./tests.sh --target axvisor          # 仅测试指定目标
+#   ./tests.sh --target axvisor-qemu     # 仅测试指定目标
 #   ./tests.sh --config /path/to/.test-config.json
 #   ./tests.sh --component-dir /path/to/component
 #
@@ -29,7 +29,7 @@ TEST_TARGET="all"
 VERBOSE=false
 CLEANUP=true
 DRY_RUN=false
-PARALLEL=true
+PARALLEL=false
 OUTPUT_DIR=""
 USE_GIT=false
 GIT_BRANCH=""
@@ -37,6 +37,8 @@ CLEAN_RESULTS=false
 AUTO_MODE=false
 LIST_JSON=false
 LIST_AUTO=false
+USE_FS_MODE=false
+PRINT_OUTPUT=false
 
 # 帮助信息
 show_help() {
@@ -54,13 +56,15 @@ Hypervisor Test Framework - 本地测试脚本
   -v, --verbose              详细输出
   --no-cleanup               不清理临时文件
   --dry-run                  仅显示将要执行的命令
-  --sequential               顺序执行测试 (不并行)
+  --parallel                 并行执行测试 (默认顺序执行)
   --from-git                 从 git 仓库拉取代码 (默认从 crates.io 下载)
   --branch BRANCH            指定 git 分支 (仅与 --from-git 一起使用)
   --clean                    清理测试生成的 test-results 目录
   --auto                     根据 rust-toolchain.toml 中的 targets 自动选择测试
   --list-auto                列出自动检测的测试目标 (JSON 格式)
   --list-json                列出所有测试目标 (JSON 格式，用于 CI matrix)
+  --fs                       使用文件系统模式，不修改配置文件
+  --print                    打印 U-Boot 和串口输出到命令行
   -h, --help                 显示此帮助
 
 测试目标:
@@ -129,8 +133,8 @@ parse_args() {
                 DRY_RUN=true
                 shift
                 ;;
-            --sequential)
-                PARALLEL=false
+            --parallel)
+                PARALLEL=true
                 shift
                 ;;
             --from-git)
@@ -156,6 +160,14 @@ parse_args() {
             --list-auto)
                 LIST_AUTO=true
                 AUTO_MODE=true
+                shift
+                ;;
+            --fs)
+                USE_FS_MODE=true
+                shift
+                ;;
+            --print)
+                PRINT_OUTPUT=true
                 shift
                 ;;
             -h|--help)
@@ -279,7 +291,7 @@ check_dependencies() {
     log_success "依赖检查通过"
 }
 
-# 默认测试目标（与 .github/workflows/test.yml 保持一致）
+# 默认测试目标
 DEFAULT_TARGETS='[
   {
     "name": "axvisor-qemu-aarch64-arceos",
@@ -374,7 +386,7 @@ DEFAULT_TARGETS='[
       "build_config": "configs/board/phytiumpi.toml",
       "uboot_config": ".github/workflows/uboot.toml",
       "vmconfigs": "configs/vms/arceos-aarch64-e2000-smp1.toml",
-      "vmimage_name": "phytiumpi_arceos",
+      "vmimage_name": "phytiumpi_arceos,phytiumpi_linux",
       "bin_dir": "/tmp/tftp"
     },
     "patch": {"path_template": "../component"}
@@ -408,7 +420,7 @@ DEFAULT_TARGETS='[
       "build_config": "configs/board/roc-rk3568-pc.toml",
       "uboot_config": ".github/workflows/uboot.toml",
       "vmconfigs": "configs/vms/arceos-aarch64-rk3568-smp1.toml",
-      "vmimage_name": "roc-rk3568-pc_arceos",
+      "vmimage_name": "roc-rk3568-pc_arceos,roc-rk3568-pc_linux",
       "bin_dir": "/tmp/tftp"
     },
     "patch": {"path_template": "../component"}
@@ -491,11 +503,95 @@ setup_output() {
     log_debug "输出目录: $OUTPUT_DIR"
 }
 
+# 控制开发板电源（通过 mbpoll）
+control_board_power() {
+    local board_name=$1
+    local action=$2  # "on" 或 "off"
+    local power_serial=""
+    
+    # 根据开发板类型确定电源控制串口
+    case "$board_name" in
+        phytiumpi)
+            power_serial="/dev/ttyUSB1"
+            ;;
+        roc-rk3568-pc)
+            power_serial="/dev/ttyUSB2"
+            ;;
+        *)
+            log_debug "  未知开发板类型: $board_name，跳过电源控制"
+            return 0
+            ;;
+    esac
+    
+    # 检查 mbpoll 是否安装
+    if ! command -v mbpoll &> /dev/null; then
+        return 0
+    fi
+    
+    # 检查串口是否存在
+    if [ ! -e "$power_serial" ]; then
+        log_warn "  电源控制串口不存在: $power_serial"
+        return 0
+    fi
+    
+    # 执行电源控制
+    if [ "$action" == "on" ]; then
+        mbpoll -m rtu -a 1 -r 1 -t 0 -b 38400 -P none -v "$power_serial" 0
+        sleep 3
+        log "  给开发板上电... ($power_serial)"
+        mbpoll -m rtu -a 1 -r 1 -t 0 -b 38400 -P none -v "$power_serial" 1
+    elif [ "$action" == "off" ]; then
+        log "  给开发板下电... ($power_serial)"
+        mbpoll -m rtu -a 1 -r 1 -t 0 -b 38400 -P none -v "$power_serial" 0 &>/dev/null || true
+    fi
+}
+
+# 清理开发板测试资源
+cleanup_board_resources() {
+    local board_name=$1
+    local test_dir=$2
+    
+    log "  清理测试资源..."
+    
+    # 1. 关闭开发板电源
+    control_board_power "$board_name" "off"
+    
+    # 2. 杀掉可能残留的 cargo-osrun 进程
+    local pids=$(ps aux | grep -E "cargo-osr|cargo osr" | grep -v grep | awk '{print $2}')
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            log_debug "    关闭残留进程: PID=$pid"
+            kill -9 $pid 2>/dev/null || true
+        done
+    fi
+    
+    # 3. 释放串口
+    local uboot_toml_file="$COMPONENT_DIR/.uboot.toml"
+    if [ -f "$uboot_toml_file" ]; then
+        local serial_port=$(jq -r ".boards[\"$board_name\"].serial // empty" "$uboot_toml_file" 2>/dev/null)
+        if [ -n "$serial_port" ] && [ -e "$serial_port" ]; then
+            local serial_pids=$(sudo lsof -ti "$serial_port" 2>/dev/null || true)
+            if [ -n "$serial_pids" ]; then
+                for pid in $serial_pids; do
+                    log_debug "    释放串口 $serial_port: PID=$pid"
+                    sudo kill -9 $pid 2>/dev/null || true
+                done
+            fi
+        fi
+    fi
+    
+    # 等待资源释放
+    sleep 2
+    log "  资源清理完成"
+}
+
 # 运行命令并监控输出，检测成功/失败标识符
 run_with_success_detection() {
     local cmd="$1"
     local timeout_minutes="$2"
     local log_file="$3"
+    local board_name="${4:-}"
+    local test_dir="${5:-}"
     local success_patterns=()
     local error_patterns=()
 
@@ -510,17 +606,23 @@ run_with_success_detection() {
     success_patterns+=("Set hostname to")
     success_patterns+=("starry:~#")
     success_patterns+=("Last login:")
+    success_patterns+=("Booting kernel with command")
     # 定义错误标识符模式
-    error_patterns+=("error:")
     error_patterns+=("error[")
     error_patterns+=("FAILED")
     error_patterns+=("panicked")
     error_patterns+=("segmentation fault")
     error_patterns+=("core dumped")
+    
+    # 特殊模式：等待开发板上电
+    local power_on_done=false
+    local power_on_time=""
 
     # 创建临时文件来存储状态
     local status_file=$(mktemp)
+    local power_flag_file=$(mktemp)
     echo "running" > "$status_file"
+    echo "false" > "$power_flag_file"
 
     # 使用 timeout 运行命令，同时监控输出
     local pid=""
@@ -536,6 +638,22 @@ run_with_success_detection() {
         while IFS= read -r line; do
             # 输出到日志
             echo "$line" >> "$log_file"
+            
+            # 根据 --print 选项决定是否输出到标准输出
+            [[ "$PRINT_OUTPUT" == true ]] && echo "$line"
+            
+            # 检测是否等待开发板上电
+            if [[ "$line" == *"Waiting for board on power or reset"* ]]; then
+                if [ "$power_on_done" == false ] && [ -n "$board_name" ]; then
+                    power_on_done=true
+                    echo "true" > "$power_flag_file"
+                    echo "$(date +%s)" >> "$power_flag_file"
+                    # 提示用户上电
+                    log "  准备就绪，请给开发板上电…"
+                    # 执行上电命令
+                    control_board_power "$board_name" "on"
+                fi
+            fi
 
             # 检测是否匹配任何错误标识符（优先检测错误）
             for pattern in "${error_patterns[@]}"; do
@@ -558,18 +676,106 @@ run_with_success_detection() {
     ) &
     local monitor_pid=$!
 
-    # 设置超时等待进程完成
-    timeout "${timeout_minutes}m" tail --pid=$pid -f /dev/null 2>/dev/null || true
-    local exit_code=$?
+    # 等待主命令完成
+    wait $pid 2>/dev/null || true
+    local main_exit_code=$?
+
+    # 对于开发板测试，主命令可能在 U-Boot 启动后就退出了
+    # 此时应该继续监控串口输出，等待内核启动完成
+    local is_powered_on=$(head -1 "$power_flag_file")
+    if [ "$is_powered_on" == "true" ] && [ -n "$board_name" ]; then
+        local power_on_timestamp=$(tail -1 "$power_flag_file")
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - power_on_timestamp))
+        local remaining_time=$((timeout_minutes * 60 - elapsed))
+        
+        if [ $remaining_time -gt 0 ]; then
+            log "  U-Boot 阶段完成，继续监控串口输出 (剩余 ${remaining_time}s)..."
+            
+            # 从 .uboot.json 获取串口设备
+            local uboot_json_file="$COMPONENT_DIR/.uboot.json"
+            local serial_port=""
+            if [ -f "$uboot_json_file" ]; then
+                serial_port=$(jq -r ".boards[\"$board_name\"].serial // empty" "$uboot_json_file" 2>/dev/null)
+            fi
+            
+            # 如果找到了串口设备，继续读取串口输出
+            if [ -n "$serial_port" ] && [ -e "$serial_port" ]; then
+                
+                # 等待串口设备可用（cargo osrun 退出后释放串口）
+                local wait_count=0
+                while [ $wait_count -lt 10 ]; do
+                    if ! lsof "$serial_port" &>/dev/null; then
+                        break
+                    fi
+                    sleep 1
+                    ((wait_count++))
+                done       
+                
+                # 保存当前终端设置
+                local saved_stty=$(stty -g 2>/dev/null) || true
+                
+                # 根据 --print 选项决定是否打印到标准输出
+                if [[ "$PRINT_OUTPUT" == true ]]; then
+                    timeout $remaining_time cat "$serial_port" 2>/dev/null | tee -a "$log_file" &
+                else
+                    timeout $remaining_time cat "$serial_port" 2>/dev/null >> "$log_file" &
+                fi
+                local serial_pid=$!
+                
+                # 监控日志文件检测成功/失败标识符
+                local extra_wait=$remaining_time
+                while [ $extra_wait -gt 0 ]; do
+                    if grep -qE "Welcome to|test pass!|All tests passed!|Hello, world!|root@firefly:~#|Set hostname to" "$log_file" 2>/dev/null; then
+                        echo -ne "\r\033[K"  # 清除当前行
+                        log "  检测到成功标识符!"
+                        echo "success" > "$status_file"
+                        break
+                    fi
+                    if grep -qE "FAILED|panicked|segmentation fault|core dumped" "$log_file" 2>/dev/null; then
+                        echo -ne "\r\033[K"  # 清除当前行
+                        log "  检测到错误标识符!"
+                        echo "error:detected" > "$status_file"
+                        break
+                    fi
+                    sleep 1
+                    ((extra_wait--))
+                done
+                
+                # 终止串口读取进程
+                kill $serial_pid 2>/dev/null || true
+                sleep 0.5
+                pkill -9 -P $serial_pid 2>/dev/null || true
+                kill -9 $serial_pid 2>/dev/null || true
+                
+                # 恢复终端设置
+                if [ -n "$saved_stty" ]; then
+                    stty "$saved_stty" 2>/dev/null || true
+                fi
+                echo -ne "\r\033[K"  # 清除当前行，确保后续输出整齐
+            else
+                # 没有串口设备，只能等待
+                log_warn "  未找到串口设备配置"
+            fi
+        fi
+    fi
 
     # 等待监控进程完成
     wait $monitor_pid 2>/dev/null || true
+
+    # 确保终端恢复正常（双重保险）
+    stty sane 2>/dev/null || true
 
     # 读取状态
     local status=$(cat "$status_file")
 
     # 清理
-    rm -f "$fifo" "$status_file"
+    rm -f "$fifo" "$status_file" "$power_flag_file"
+    
+    # 如果是开发板测试，清理资源（关闭电源、释放串口等）
+    if [ -n "$board_name" ] && [ -n "$test_dir" ]; then
+        cleanup_board_resources "$board_name" "$test_dir"
+    fi
 
     # 根据状态返回结果
     if [[ "$status" == error:* ]]; then
@@ -577,9 +783,14 @@ run_with_success_detection() {
         return 1
     elif [ "$status" = "success" ]; then
         return 0
-    elif [ $exit_code -eq 124 ]; then
+    elif [ $main_exit_code -eq 124 ]; then
         return 124
     else
+        # 检查是否是因为检测到成功标识符而结束
+        if [ "$status" = "success" ]; then
+            return 0
+        fi
+        # 进程退出但没有检测到成功标识符，视为失败
         return 1
     fi
 }
@@ -959,7 +1170,7 @@ EOF
                 log "  安装 ostool..."
                 cargo +stable install ostool --version ^0.8
             fi
-            
+
             # 创建 TFTP 目录
             local bin_dir=$(echo "$target_config" | jq -r '.test.bin_dir // "/tmp/tftp"')
             sudo mkdir -p "$bin_dir"
@@ -1009,8 +1220,10 @@ EOF
                         fi
                     fi
                     
-                    # 更新配置文件
-                    if [ -f "$test_dir/$config" ]; then
+                    # 更新配置文件（仅在非 --fs 模式下）
+                    if [ "$USE_FS_MODE" == true ]; then
+                        log "  --fs 模式: 跳过配置文件修改"
+                    elif [ -f "$test_dir/$config" ]; then
                         cd "$test_dir"
                         
                         # 获取 image_location
@@ -1191,23 +1404,56 @@ EOF
             fi
 
             # 步骤 2: 修改 .build.toml 文件
-            log "  步骤 2: 更新 .build.toml 配置..."
+            log "  更新 .build.toml 配置..."
             local build_toml=".build.toml"
 
             if [ -f "$build_toml" ]; then
-                # 使用 awk 来替换 features 和 vm_configs
-                awk -v vm_configs="$vm_configs_json" '
-                    /^features = \[/ { in_features=1; print "features = ["; print "    # \"ept-level-4\","; print "    \"dyn-plat\","; print "    \"axstd/bus-mmio\","; print "]"; next }
-                    in_features { if(/^\]/) { in_features=0 } next }
-                    /^vm_configs = \[/ { in_vm=1; next }
-                    in_vm { if(/^\]/) { in_vm=0 } next }
-                    /^log = / { print $0 "\nvm_configs = " vm_configs; next }
-                    { print }
-                ' "$build_toml" > "$build_toml.tmp" && mv "$build_toml.tmp" "$build_toml"
+                if [ "$USE_FS_MODE" == true ]; then
+                    local fs_vm_configs=""
+                    case "$target_name" in
+                        axvisor-board-phytiumpi-arceos)
+                            fs_vm_configs='["configs/vms/arceos-aarch64-e2000-smp1.toml"]'
+                            ;;
+                        axvisor-board-phytiumpi-linux)
+                            fs_vm_configs='["configs/vms/linux-aarch64-e2000-smp1.toml"]'
+                            ;;
+                        axvisor-board-roc-rk3568-pc-arceos)
+                            fs_vm_configs='["configs/vms/arceos-aarch64-rk3568-smp1.toml"]'
+                            ;;
+                        axvisor-board-roc-rk3568-pc-linux)
+                            fs_vm_configs='["configs/vms/linux-aarch64-rk3568-smp1.toml"]'
+                            ;;
+                        *)
+                            log_warn "  未知目标: $target_name，使用默认 vm_configs"
+                            fs_vm_configs="$vm_configs_json"
+                            ;;
+                    esac
 
-                log_success "  .build.toml 更新完成"
-                log_debug "    - Features 已更新"
-                log_debug "    - vm_configs: $vm_configs_json"
+                    # 仅替换 vm_configs，保留 features
+                    awk -v vm_configs="$fs_vm_configs" '
+                        /^vm_configs = \[/ { in_vm=1; next }
+                        in_vm { if(/^\]/) { in_vm=0 } next }
+                        /^log = / { print $0 "\nvm_configs = " vm_configs; next }
+                        { print }
+                    ' "$build_toml" > "$build_toml.tmp" && mv "$build_toml.tmp" "$build_toml"
+
+                    log_success "  .build.toml 更新完成 (--fs 模式)"
+                    log_debug "    - vm_configs: $fs_vm_configs"
+                else
+                    # 非 --fs 模式: 修改 features 和 vm_configs
+                    awk -v vm_configs="$vm_configs_json" '
+                        /^features = \[/ { in_features=1; print "features = ["; print "    # \"ept-level-4\","; print "    \"dyn-plat\","; print "    \"axstd/bus-mmio\","; print "]"; next }
+                        in_features { if(/^\]/) { in_features=0 } next }
+                        /^vm_configs = \[/ { in_vm=1; next }
+                        in_vm { if(/^\]/) { in_vm=0 } next }
+                        /^log = / { print $0 "\nvm_configs = " vm_configs; next }
+                        { print }
+                    ' "$build_toml" > "$build_toml.tmp" && mv "$build_toml.tmp" "$build_toml"
+
+                    log_success "  .build.toml 更新完成"
+                    log_debug "    - Features 已更新"
+                    log_debug "    - vm_configs: $vm_configs_json"
+                fi
             else
                 log_error "  未找到 .build.toml 文件"
                 echo "failed" > "$status_file"
@@ -1215,32 +1461,71 @@ EOF
                 return 1
             fi
 
-            # 步骤 3: 检查 .uboot.toml 是否存在，不存在则提示用户输入
-            log "  步骤 3: 检查 U-Boot 配置..."
+            # 步骤 3: 检查 .uboot.toml 是否存在，不存在则从配置文件读取或提示用户输入
+            log "  检查 U-Boot 配置..."
             local uboot_config_file=".uboot.toml"
+            local uboot_json_file="$COMPONENT_DIR/.uboot.json"
 
             if [ ! -f "$uboot_config_file" ]; then
-                # 生成交互式配置文件
-                log ""
-                log "  ======== 配置 U-Boot 参数 ======== "
-                log ""
+                local serial_input=""
+                local baud_rate_input=""
+                local dtb_file_input=""
+                local board_name=$(echo "$target_config" | jq -r '.board')
 
-                # 提示用户输入 serial
-                echo -e "${CYAN}请输入串口设备路径 (例如: /dev/ttyUSB0):${NC}"
-                read -p "> " serial_input
-                serial_input="${serial_input:-/dev/ttyUSB0}"
+                # 尝试从 .uboot.json 读取配置
+                if [ -f "$uboot_json_file" ]; then
+                    log "  从 .uboot.json 读取 $board_name 的配置..."
+                    
+                    # 检查配置文件中是否有该 board 的配置
+                    local board_config=$(jq -e ".boards[\"$board_name\"]" "$uboot_json_file" 2>/dev/null)
+                    if [ $? -eq 0 ] && [ -n "$board_config" ]; then
+                        serial_input=$(echo "$board_config" | jq -r '.serial // empty')
+                        baud_rate_input=$(echo "$board_config" | jq -r '.baud_rate // empty')
+                        dtb_file_input=$(echo "$board_config" | jq -r '.dtb_file // empty')
+                        
+                        if [ -n "$serial_input" ] && [ -n "$baud_rate_input" ] && [ -n "$dtb_file_input" ]; then
+                            log "  从配置文件读取到:"
+                            log "  - 串口: $serial_input"
+                            log "  - 波特率: $baud_rate_input"
+                            log "  - DTB文件: $dtb_file_input"
+                        else
+                            log_warn "  .uboot.json 中 $board_name 的配置不完整，将使用交互式输入"
+                            serial_input=""
+                            baud_rate_input=""
+                            dtb_file_input=""
+                        fi
+                    else
+                        log_warn "  .uboot.json 中未找到 $board_name 的配置，将使用交互式输入"
+                    fi
+                else
+                    log "  未找到 .uboot.json 配置文件 ($uboot_json_file)"
+                fi
 
-                # 提示用户输入 baud_rate
-                echo ""
-                echo -e "${CYAN}请输入波特率 (例如: 115200):${NC}"
-                read -p "> " baud_rate_input
-                baud_rate_input="${baud_rate_input:-115200}"
+                # 如果从配置文件读取失败，则使用交互式输入
+                if [ -z "$serial_input" ] || [ -z "$baud_rate_input" ] || [ -z "$dtb_file_input" ]; then
+                    log ""
+                    log "  ======== 配置 U-Boot 参数 ======== "
+                    log ""
 
-                # 提示用户输入 dtb_file
-                echo ""
-                echo -e "${CYAN}请输入 DTB 文件路径 (例如: board/orangepi-5-plus.dtb):${NC}"
-                read -p "> " dtb_file_input
-                dtb_file_input="${dtb_file_input:-board/orangepi-5-plus.dtb}"
+                    # 提示用户输入 serial
+                    echo -e "${CYAN}请输入串口设备路径 (例如: /dev/ttyUSB0):${NC}"
+                    read -p "> " serial_input
+                    serial_input="${serial_input:-/dev/ttyUSB0}"
+
+                    # 提示用户输入 baud_rate
+                    echo ""
+                    echo -e "${CYAN}请输入波特率 (例如: 115200):${NC}"
+                    read -p "> " baud_rate_input
+                    baud_rate_input="${baud_rate_input:-115200}"
+
+                    # 提示用户输入 dtb_file
+                    echo ""
+                    echo -e "${CYAN}请输入 DTB 文件路径 (例如: board/orangepi-5-plus.dtb):${NC}"
+                    read -p "> " dtb_file_input
+                    dtb_file_input="${dtb_file_input:-board/orangepi-5-plus.dtb}"
+                    
+                    log ""
+                fi
 
                 # 生成 .uboot.toml 文件
                 cat > "$uboot_config_file" << EOF
@@ -1251,11 +1536,7 @@ fail_regex = []
 dtb_file = "$dtb_file_input"
 EOF
 
-                log ""
                 log "  U-Boot 配置已保存到: $uboot_config_file"
-                log "  - 串口: $serial_input"
-                log "  - 波特率: $baud_rate_input"
-                log "  - DTB文件: $dtb_file_input"
                 log ""
             else
                 log "  使用已存在的配置文件: $uboot_config_file"
@@ -1276,7 +1557,13 @@ EOF
             export RUST_LOG=debug
 
             # 使用成功检测函数运行测试
-            run_with_success_detection "$full_test_cmd" "${test_timeout}" "$log_file"
+            # 对于 board 测试，传入 board_name 和 test_dir 用于电源控制和资源清理
+            if [ "$test_type" == "board" ]; then
+                local board_name=$(echo "$target_config" | jq -r '.board // empty')
+                run_with_success_detection "$full_test_cmd" "${test_timeout}" "$log_file" "$board_name" "$test_dir"
+            else
+                run_with_success_detection "$full_test_cmd" "${test_timeout}" "$log_file"
+            fi
             local exit_code=$?
 
             if [ $exit_code -eq 0 ]; then

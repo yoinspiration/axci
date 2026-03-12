@@ -24,11 +24,12 @@ jobs:
     outputs:
       targets: ${{ steps.detect.outputs.targets }}
       has-targets: ${{ steps.detect.outputs.has-targets }}
+      matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - name: Checkout component
         uses: actions/checkout@v4
 
-      - name: Download tests.sh
+      - name: Download test script
         run: |
           curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/tests.sh -o tests.sh
           chmod +x tests.sh
@@ -36,8 +37,42 @@ jobs:
       - name: Detect test targets
         id: detect
         run: |
+          # 获取测试目标列表
           TARGETS=$(./tests.sh --list-auto)
           echo "targets=$TARGETS" >> $GITHUB_OUTPUT
+          
+          # 生成 matrix 配置，包含 target 和对应的 runner
+          MATRIX="["
+          first=true
+          
+          # 解析每个目标并分配对应的 runner
+          for target in $(echo "$TARGETS" | jq -r '.[]'); do
+            if [ "$first" = true ]; then
+              first=false
+            else
+              MATRIX+=","
+            fi
+            
+          # 根据目标类型确定 runner (self-hosted runner 需要数组格式)
+            if [[ "$target" == *"board-phytiumpi"* ]]; then
+              runner='["self-hosted", "phytiumpi"]'
+              board='"phytiumpi"'
+            elif [[ "$target" == *"board-roc-rk3568-pc"* ]]; then
+              runner='["self-hosted", "roc-rk3568-pc"]'
+              board='"roc-rk3568-pc"'
+            else
+              # QEMU 测试和其他测试使用 self-hosted
+              runner='"self-hosted"'
+              board='null'
+            fi
+            
+            MATRIX+="{\"target\":\"$target\",\"runner\":$runner,\"board\":$board}"
+          done
+          MATRIX+="]"
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Generated matrix: $MATRIX"
+          
           if [ "$TARGETS" = "[]" ]; then
             echo "has-targets=false" >> $GITHUB_OUTPUT
           else
@@ -50,31 +85,24 @@ jobs:
     name: Test ${{ matrix.target }}
     needs: detect-targets
     if: needs.detect-targets.outputs.has-targets == 'true'
-    runs-on: self-hosted
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.detect-targets.outputs.targets) }}
+        include: ${{ fromJson(needs.detect-targets.outputs.matrix) }}
     steps:
       - name: Checkout component
         uses: actions/checkout@v4
 
-      - name: Download tests.sh
+      - name: Download test script
         run: |
           curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/tests.sh -o tests.sh
+          curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/.uboot.json -o .uboot.json
           chmod +x tests.sh
 
       - name: Run test for ${{ matrix.target }}
         run: |
-          ./tests.sh -t ${{ matrix.target }} --dry-run
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ matrix.target }}
-          path: test-results/
-          retention-days: 7
+          ./tests.sh -t ${{ matrix.target }} --fs --print
 
   # 无测试目标时的提示
   no-tests:
