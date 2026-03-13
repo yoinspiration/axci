@@ -267,6 +267,13 @@ git push origin v1.0.0-pre.1
 `test.yml` 工作流运行集成测试，通过 patch 方式将组件集成到测试目标中构建验证。
 本仓库同时提供 `tests.sh` 本地脚本用于同逻辑验证，支持 `--auto-target` 按变更自动选取目标。
 
+### 依赖感知文档导航
+
+为避免“项目案例”和“通用设计”混淆，依赖感知相关说明拆分为两份：
+
+- `dependency-aware-testing.md`：axci 通用设计（推荐优先阅读）
+- `axvisor-case-study.md`：AxVisor 落地案例（背景与示例）
+
 **执行过程：**
 
 ```mermaid
@@ -354,6 +361,21 @@ jobs:
 ```bash
 bash tests.sh --auto-target --base-ref origin/main --dry-run -v
 ```
+
+**30 秒演示（只解析目标，不执行测试）：**
+
+```bash
+# 1) 进入组件仓库（示例：axvisor）
+cd /path/to/component-repo
+
+# 2) 调用 axci 的自动选目标逻辑（-n 只解析，不跑测试）
+/path/to/axci/tests.sh --auto-target --base-ref HEAD~1 -n
+```
+
+预期输出会出现“自动目标选择 ...”，用于快速说明：
+- 文档改动可跳过
+- 局部改动精确命中
+- 核心改动触发全量
 
 规则定义已外置到 `configs/test-target-rules.json`，脚本仅负责解释执行。
 

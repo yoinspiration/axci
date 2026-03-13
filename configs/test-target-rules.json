@@ -1,7 +1,8 @@
 {
   "non_code": {
     "dirs": [
-      "doc/"
+      "doc/",
+      "docs/"
     ],
     "exts": [
       ".md",
@@ -41,7 +42,11 @@
       ],
       "targets": [
         "axvisor-qemu-aarch64-arceos",
-        "axvisor-qemu-aarch64-linux"
+        "axvisor-qemu-aarch64-linux",
+        "axvisor-board-phytiumpi-arceos",
+        "axvisor-board-phytiumpi-linux",
+        "axvisor-board-roc-rk3568-pc-arceos",
+        "axvisor-board-roc-rk3568-pc-linux"
       ]
     },
     {

@@ -1570,6 +1570,17 @@ EOF
             cd "$test_dir"
             export RUST_LOG=debug
             if [[ "$target_name" == starry-* ]] && [ ! -f "$test_dir/disk.img" ]; then
+                # 兼容 Starry 新旧 rootfs 命名：disk.img 或 rootfs-<arch>.img
+                local starry_arch
+                local arch_rootfs
+                starry_arch="$(echo "$target_config" | jq -r '.arch // empty')"
+                arch_rootfs="$test_dir/rootfs-${starry_arch}.img"
+                if [ -n "$starry_arch" ] && [ -f "$arch_rootfs" ]; then
+                    ln -sf "rootfs-${starry_arch}.img" "$test_dir/disk.img"
+                    log "  检测到 rootfs-${starry_arch}.img，已链接为 disk.img"
+                fi
+            fi
+            if [[ "$target_name" == starry-* ]] && [ ! -f "$test_dir/disk.img" ]; then
                 log_error "  缺少 rootfs 镜像: $test_dir/disk.img"
                 set_target_result "$status_file" "$meta_file" "failed" "$dependency_check_result" "$kvm_check_result" "$image_retry_count" "$registry_fallback_used"
                 cd "$COMPONENT_DIR"
