@@ -83,14 +83,21 @@ jobs:
 
       - name: Build axci-affected engine
         id: build_axci_affected
-        working-directory: axci-rules/axci-affected
-        run: cargo build --release
+        run: |
+          if [ ! -d "axci-rules/axci-affected" ]; then
+            echo "axci-affected source not found, skip engine build"
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          (cd axci-rules/axci-affected && cargo build --release)
+          echo "built=true" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       - name: Test axci-affected engine
-        if: steps.build_axci_affected.outcome == 'success'
-        working-directory: axci-rules/axci-affected
-        run: cargo test
+        if: steps.build_axci_affected.outcome == 'success' && steps.build_axci_affected.outputs.built == 'true'
+        run: |
+          cd axci-rules/axci-affected
+          cargo test
 
       - name: Build dynamic matrix from test_targets input
         id: matrix
