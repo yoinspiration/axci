@@ -32,6 +32,11 @@ on:
         required: false
         default: 'origin/main'
         type: string
+      runs_on:
+        description: 'JSON array for runner labels, e.g. ["ubuntu-latest"] or ["self-hosted","linux","docker"]'
+        required: false
+        default: '["ubuntu-latest"]'
+        type: string
 
 jobs:
   detect:
@@ -443,8 +448,8 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.detect.outputs.axvisor_matrix) }}
-    # Use hosted runner to avoid fork users being blocked by self-hosted labels.
-    runs-on: ubuntu-latest
+    # Default uses hosted runner; callers can override via runs_on input.
+    runs-on: ${{ fromJson(inputs.runs_on) }}
 
     steps:
       - name: Clean up workspace
@@ -683,7 +688,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.detect.outputs.starry_matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJson(inputs.runs_on) }}
 
     steps:
       - name: Harden git network settings
