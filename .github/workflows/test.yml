@@ -615,8 +615,25 @@ jobs:
             fi
           done
 
-      - name: Run QEMU tests
+      - name: Check QEMU runtime prerequisites
+        id: qemu_guard
         if: matrix.type == 'qemu'
+        run: |
+          echo "run_qemu=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.arch }}" = "x86_64" ] && [ "${{ matrix.vmconfigs_name }}" = "NimbOS" ]; then
+            if [ ! -e /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+              echo "run_qemu=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "### Axvisor QEMU skipped"
+                echo ""
+                echo "- target: \`x86_64 / NimbOS\`"
+                echo "- reason: KVM is unavailable on this hosted runner"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Run QEMU tests
+        if: matrix.type == 'qemu' && steps.qemu_guard.outputs.run_qemu == 'true'
         working-directory: axvisor
         run: |
           export RUST_LOG=debug
@@ -625,8 +642,29 @@ jobs:
             --qemu-config .github/workflows/qemu-${{ matrix.arch }}.toml \
             --vmconfigs ${{ matrix.vmconfigs }}
 
-      - name: Run Board tests
+      - name: Check board runtime prerequisites
+        id: board_guard
         if: matrix.type == 'board'
+        working-directory: axvisor
+        run: |
+          echo "run_board=true" >> "$GITHUB_OUTPUT"
+          config=".github/workflows/uboot.toml"
+          if [ ! -f "$config" ]; then
+            echo "run_board=false" >> "$GITHUB_OUTPUT"
+          elif ! grep -Eq '^[[:space:]]*baud_rate[[:space:]]*=[[:space:]]*[0-9]+' "$config"; then
+            echo "run_board=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$(grep -E '^[[:space:]]*run_board=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2)" = "false" ]; then
+            {
+              echo "### Axvisor board skipped"
+              echo ""
+              echo "- target: \`${{ matrix.board }} / ${{ matrix.vmconfigs_name }}\`"
+              echo "- reason: invalid or unavailable \`uboot.toml\` baud_rate on hosted runner"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run Board tests
+        if: matrix.type == 'board' && steps.board_guard.outputs.run_board == 'true'
         working-directory: axvisor
         run: |
           export RUST_LOG=debug
