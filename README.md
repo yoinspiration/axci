@@ -10,13 +10,15 @@
 
 **工作流列表：**
 
-| 工作流 | 功能 |
-|--------|------|
-| `check.yml` | 代码质量检查（fmt、clippy、build、doc） |
-| `test.yml` | 集成测试（通过 axtest 框架） |
-| `verify-tag.yml` | 验证版本标签（分支、版本一致性） |
-| `deploy.yml` | 部署文档到 GitHub Pages |
-| `release.yml` | 创建 GitHub Release 并发布到 crates.io |
+
+| 工作流              | 功能                               |
+| ---------------- | -------------------------------- |
+| `check.yml`      | 代码质量检查（fmt、clippy、build、doc）     |
+| `test.yml`       | 集成测试（通过 axtest 框架）               |
+| `verify-tag.yml` | 验证版本标签（分支、版本一致性）                 |
+| `deploy.yml`     | 部署文档到 GitHub Pages               |
+| `release.yml`    | 创建 GitHub Release 并发布到 crates.io |
+
 
 **目录结构：**
 
@@ -52,6 +54,8 @@ flowchart LR
     E --> F[doc]
 ```
 
+
+
 **详细步骤：**
 
 1. **Checkout** - 检出代码
@@ -60,16 +64,18 @@ flowchart LR
 4. **Build** - `cargo build --target <target> [--all-features]`（可设置 `skip_build: true` 跳过）
 5. **Run clippy** - `cargo clippy --target <target> [--all-features] -- -D warnings`
 6. **Build documentation** - `cargo doc --no-deps --target <target> [--all-features]`
-   - 设置 `RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D missing-docs`
+  - 设置 `RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D missing-docs`
 
 **输入参数：**
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `all_features` | 是否使用 --all-features 标志 | true |
-| `targets` | 编译目标 (JSON 数组) | `["aarch64-unknown-none-softfloat"]` |
-| `rust_components` | Rust 组件 (逗号分隔) | `rust-src, clippy, rustfmt, llvm-tools` |
-| `skip_build` | 是否跳过 build 步骤 | false |
+
+| 参数                | 说明                     | 默认值                                     |
+| ----------------- | ---------------------- | --------------------------------------- |
+| `all_features`    | 是否使用 --all-features 标志 | true                                    |
+| `targets`         | 编译目标 (JSON 数组)         | `["aarch64-unknown-none-softfloat"]`    |
+| `rust_components` | Rust 组件 (逗号分隔)         | `rust-src, clippy, rustfmt, llvm-tools` |
+| `skip_build`      | 是否跳过 build 步骤          | false                                   |
+
 
 ### 使用
 
@@ -123,25 +129,29 @@ flowchart TB
     H --> I[Deploy to Pages]
 ```
 
+
+
 **详细步骤：**
 
 1. **verify-tag job** - 调用 `verify-tag.yml` 验证标签合法性
 2. **build job** - 构建文档
-   - Checkout - 检出代码
-   - Install Rust - 安装 nightly 工具链
-   - Build docs - `cargo doc --no-deps --all-features`
-     - 设置 `RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D missing-docs`
-     - 生成重定向首页 `index.html`
-   - Upload artifact - 上传文档产物
+  - Checkout - 检出代码
+  - Install Rust - 安装 nightly 工具链
+  - Build docs - `cargo doc --no-deps --all-features`
+    - 设置 `RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D missing-docs`
+    - 生成重定向首页 `index.html`
+  - Upload artifact - 上传文档产物
 3. **deploy job** - 部署到 GitHub Pages
-   - 使用 `actions/deploy-pages@v4` 部署
+  - 使用 `actions/deploy-pages@v4` 部署
 
 **输入参数：**
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `verify_branch` | 验证标签是否在 main/master 分支 | true |
-| `verify_version` | 验证 Cargo.toml 版本与标签一致 | true |
+
+| 参数               | 说明                     | 默认值  |
+| ---------------- | ---------------------- | ---- |
+| `verify_branch`  | 验证标签是否在 main/master 分支 | true |
+| `verify_version` | 验证 Cargo.toml 版本与标签一致  | true |
+
 
 ### 使用
 
@@ -182,34 +192,40 @@ flowchart TB
     I --> J[cargo publish]
 ```
 
+
+
 **详细步骤：**
 
 1. **verify-tag job** - 调用 `verify-tag.yml` 验证标签合法性
 2. **release job** - 创建 GitHub Release
-   - Checkout - 检出代码（完整历史）
-   - Generate release notes - 从上一个 tag 生成 changelog
-     - `git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${CURRENT_TAG}"`
-   - Create GitHub Release - 使用 `softprops/action-gh-release@v2`
-     - 稳定版本：`prerelease: false`
-     - 预发布版本：`prerelease: true`
+  - Checkout - 检出代码（完整历史）
+  - Generate release notes - 从上一个 tag 生成 changelog
+    - `git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${CURRENT_TAG}"`
+  - Create GitHub Release - 使用 `softprops/action-gh-release@v2`
+    - 稳定版本：`prerelease: false`
+    - 预发布版本：`prerelease: true`
 3. **publish job** - 发布到 crates.io
-   - Checkout - 检出代码
-   - Install Rust - 安装 nightly 工具链
-   - Dry run publish - `cargo publish --dry-run`
-   - Publish to crates.io - `cargo publish --token $CARGO_REGISTRY_TOKEN`
+  - Checkout - 检出代码
+  - Install Rust - 安装 nightly 工具链
+  - Dry run publish - `cargo publish --dry-run`
+  - Publish to crates.io - `cargo publish --token $CARGO_REGISTRY_TOKEN`
 
 **输入参数：**
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `verify_branch` | 验证标签是否在正确分支 | true |
+
+| 参数               | 说明                    | 默认值  |
+| ---------------- | --------------------- | ---- |
+| `verify_branch`  | 验证标签是否在正确分支           | true |
 | `verify_version` | 验证 Cargo.toml 版本与标签一致 | true |
+
 
 **Secrets：**
 
-| Secret | 说明 |
-|--------|------|
+
+| Secret                 | 说明                    |
+| ---------------------- | --------------------- |
 | `CARGO_REGISTRY_TOKEN` | crates.io 的 API token |
+
 
 ### 使用
 
@@ -234,6 +250,7 @@ jobs:
 **版本发布流程：**
 
 稳定版本：
+
 ```bash
 # 1. 更新 Cargo.toml 中的版本号
 # 2. 提交并推送到 main/master
@@ -246,6 +263,7 @@ git push origin v1.0.0
 ```
 
 预发布版本：
+
 ```bash
 # 1. 在 dev 分支工作
 git checkout dev
@@ -288,30 +306,35 @@ flowchart TB
     G --> H[Run test]
 ```
 
+
+
 **详细步骤：**
 
 1. **detect job** - 动态生成测试矩阵
-   - 根据 `test_targets` 输入构造 `axvisor_matrix` 与 `starry_matrix`
-   - 输出 `skip_all` 与决策摘要
+  - 根据 `test_targets` 输入构造 `axvisor_matrix` 与 `starry_matrix`
+  - 输出 `skip_all` 与决策摘要
 2. **test jobs** - 并行执行测试（每个 target 一个 job）
-   - Checkout component - 检出被测组件到 `component/`
-   - Checkout test target - 检出测试目标仓库到 `test-target/`
-   - Get component crate name - 从 Cargo.toml 检测或使用输入值
-    - Apply patch to Cargo.toml - 添加 `[patch.crates-io]` 覆盖依赖
-    - Build/Test - 执行目标测试命令
+  - Checkout component - 检出被测组件到 `component/`
+  - Checkout test target - 检出测试目标仓库到 `test-target/`
+  - Get component crate name - 从 Cargo.toml 检测或使用输入值
+  - Apply patch to Cargo.toml - 添加 `[patch.crates-io]` 覆盖依赖
+  - Build/Test - 执行目标测试命令
 
 **输入参数：**
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `crate_name` | 组件 crate 名称 | 自动检测 |
-| `test_targets` | 测试目标（逗号分隔、`all` 或 `auto`） | all |
-| `base_ref` | `test_targets=auto` 时用于 `git diff` 的基线 | origin/main |
-| `skip_build` | 跳过构建（当前未启用） | false |
+
+| 参数             | 说明                                     | 默认值         |
+| -------------- | -------------------------------------- | ----------- |
+| `crate_name`   | 组件 crate 名称                            | 自动检测        |
+| `test_targets` | 测试目标（逗号分隔、`all` 或 `auto`）              | all         |
+| `base_ref`     | `test_targets=auto` 时用于 `git diff` 的基线 | origin/main |
+| `skip_build`   | 跳过构建（当前未启用）                            | false       |
+
 
 **默认测试目标：**
-- `axvisor` - https://github.com/arceos-hypervisor/axvisor
-- `starry` - https://github.com/Starry-OS/StarryOS
+
+- `axvisor` - [https://github.com/arceos-hypervisor/axvisor](https://github.com/arceos-hypervisor/axvisor)
+- `starry` - [https://github.com/Starry-OS/StarryOS](https://github.com/Starry-OS/StarryOS)
 
 ### 使用
 
@@ -373,6 +396,7 @@ cd /path/to/component-repo
 ```
 
 预期输出会出现“自动目标选择 ...”，用于快速说明：
+
 - 文档改动可跳过
 - 局部改动精确命中
 - 核心改动触发全量
@@ -381,14 +405,17 @@ cd /path/to/component-repo
 
 **规则文件字段：**
 
-| 字段 | 说明 |
-|------|------|
-| `non_code` | 非代码文件判定（目录/后缀/固定文件） |
-| `run_all_patterns` | 命中后直接全量测试 |
-| `selection_rules` | 路径模式到目标列表的映射规则 |
-| `target_order` | 自动选择结果输出顺序 |
+
+| 字段                 | 说明                  |
+| ------------------ | ------------------- |
+| `non_code`         | 非代码文件判定（目录/后缀/固定文件） |
+| `run_all_patterns` | 命中后直接全量测试           |
+| `selection_rules`  | 路径模式到目标列表的映射规则      |
+| `target_order`     | 自动选择结果输出顺序          |
+
 
 **维护建议：**
+
 - 调整路径匹配优先修改 `configs/test-target-rules.json`，避免改动脚本逻辑。
 - 新增目标时同步更新 `selection_rules` 与 `target_order`。
 
@@ -424,30 +451,36 @@ flowchart TB
     Q -->|false| T
 ```
 
+
+
 **详细步骤：**
 
 1. **Skip all verifications** - 如果 `verify_branch=false` 且 `verify_version=false`，直接通过
 2. **Checkout code** - 检出代码（完整历史）
 3. **Check tag type and branch** - 检查标签类型和分支
-   - 预发布标签 `v*.*.*-pre.*` 必须在 `dev` 分支
-   - 稳定标签 `v*.*.*` 必须在 `main` 或 `master` 分支
-   - 未知格式标签拒绝通过
+  - 预发布标签 `v*.*.*-pre.`* 必须在 `dev` 分支
+  - 稳定标签 `v*.*.*` 必须在 `main` 或 `master` 分支
+  - 未知格式标签拒绝通过
 4. **Verify version consistency** - 验证版本一致性（如果 `verify_version=true`）
-   - 比较标签版本与 `Cargo.toml` 中的 `version` 字段
+  - 比较标签版本与 `Cargo.toml` 中的 `version` 字段
 
 **输入参数：**
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `verify_branch` | 验证标签是否在正确分支 | true |
+
+| 参数               | 说明                    | 默认值  |
+| ---------------- | --------------------- | ---- |
+| `verify_branch`  | 验证标签是否在正确分支           | true |
 | `verify_version` | 验证 Cargo.toml 版本与标签一致 | true |
+
 
 **输出：**
 
-| 输出 | 说明 |
-|------|------|
+
+| 输出               | 说明                    |
+| ---------------- | --------------------- |
 | `should_proceed` | 是否继续执行 deploy/release |
-| `is_prerelease` | 是否为预发布标签 |
+| `is_prerelease`  | 是否为预发布标签              |
+
 
 ## License
 
