@@ -76,7 +76,7 @@ jobs:
         uses: actions/checkout@v4
         timeout-minutes: 10
         with:
-          repository: arceos-hypervisor/axci
+          repository: yoinspiration/axci
           ref: ${{ steps.axci_ref.outputs.ref }}
           path: axci-rules
 
