@@ -358,11 +358,34 @@ jobs:
             IS_AUTO=true
           fi
 
-          AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --argjson targets "$TARGETS_JSON" '
+          AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --argjson targets "$TARGETS_JSON" --arg runs_on_json "${{ inputs.runs_on }}" '
             if (($targets | index("all")) != null) or (($targets | index("axvisor")) != null) then
-              map(del(.target_key))
+              map(
+                del(.target_key)
+                | . + {
+                    runner_labels_json: (
+                      if .type == "board" then
+                        ("[\"self-hosted\",\"Linux\",\"X64\",\"" + .board + "\"]")
+                      else
+                        $runs_on_json
+                      end
+                    )
+                  }
+              )
             else
-              map(select(. as $item | ($targets | index($item.target_key)) != null)) | map(del(.target_key))
+              map(select(. as $item | ($targets | index($item.target_key)) != null))
+              | map(
+                  del(.target_key)
+                  | . + {
+                      runner_labels_json: (
+                        if .type == "board" then
+                          ("[\"self-hosted\",\"Linux\",\"X64\",\"" + .board + "\"]")
+                        else
+                          $runs_on_json
+                        end
+                      )
+                    }
+                )
             end
           ')
 
@@ -376,7 +399,20 @@ jobs:
 
           # Backward-compatibility: manual non-auto empty targets should still mean "all".
           if [ "$IS_AUTO" != "true" ] && [ "$(echo "$TARGETS_JSON" | jq 'length')" -eq 0 ]; then
-            AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c 'map(del(.target_key))')
+            AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --arg runs_on_json "${{ inputs.runs_on }}" '
+              map(
+                del(.target_key)
+                | . + {
+                    runner_labels_json: (
+                      if .type == "board" then
+                        ("[\"self-hosted\",\"Linux\",\"X64\",\"" + .board + "\"]")
+                      else
+                        $runs_on_json
+                      end
+                    )
+                  }
+              )
+            ')
             STARRY_MATRIX=$(echo "$STARRY_ALL" | jq -c 'map(del(.target_key))')
           fi
 
@@ -451,8 +487,8 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.detect.outputs.axvisor_matrix) }}
-    # Default uses hosted runner; callers can override via runs_on input.
-    runs-on: ${{ fromJson(inputs.runs_on) }}
+    # Board targets must pin to board-labeled runners; qemu targets follow inputs.runs_on.
+    runs-on: ${{ fromJson(matrix.runner_labels_json) }}
 
     steps:
       - name: Clean up workspace
