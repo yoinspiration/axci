@@ -63,6 +63,8 @@ jobs:
       skip_all: ${{ steps.matrix.outputs.skip_all }}
       selection_mode: ${{ steps.matrix.outputs.selection_mode }}
       requested_targets: ${{ steps.matrix.outputs.requested_targets }}
+      resolved_targets: ${{ steps.matrix.outputs.resolved_targets }}
+      auto_reason: ${{ steps.matrix.outputs.auto_reason }}
       axvisor_count: ${{ steps.matrix.outputs.axvisor_count }}
       starry_count: ${{ steps.matrix.outputs.starry_count }}
     steps:
@@ -454,6 +456,8 @@ jobs:
           echo "skip_all=$SKIP_ALL" >> "$GITHUB_OUTPUT"
           echo "selection_mode=$SELECTION_MODE" >> "$GITHUB_OUTPUT"
           echo "requested_targets=$INPUT" >> "$GITHUB_OUTPUT"
+          echo "resolved_targets=$TARGETS_JSON" >> "$GITHUB_OUTPUT"
+          echo "auto_reason=$AUTO_REASON" >> "$GITHUB_OUTPUT"
           echo "axvisor_count=$AXVISOR_COUNT" >> "$GITHUB_OUTPUT"
           echo "starry_count=$STARRY_COUNT" >> "$GITHUB_OUTPUT"
 
@@ -472,6 +476,8 @@ jobs:
             echo "| Item | Value |"
             echo "|---|---|"
             echo "| requested_targets | \`${{ steps.matrix.outputs.requested_targets }}\` |"
+            echo "| resolved_targets | \`${{ steps.matrix.outputs.resolved_targets }}\` |"
+            echo "| auto_reason | \`${{ steps.matrix.outputs.auto_reason }}\` |"
             echo "| selection_mode | \`${{ steps.matrix.outputs.selection_mode }}\` |"
             echo "| skip_all | \`${{ steps.matrix.outputs.skip_all }}\` |"
             echo "| axvisor_count | \`${{ steps.matrix.outputs.axvisor_count }}\` |"
