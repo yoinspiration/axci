@@ -120,7 +120,7 @@ jobs:
           AUTO_REASON="manual_input"
 
           parse_targets_input() {
-            printf '%s' "$1" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))'
+            jq -cn --arg input "$1" '$input | split(",") | map(gsub("^\\s+|\\s+$";"")) | map(select(length > 0))'
           }
 
           is_non_code_file() {
@@ -329,6 +329,11 @@ jobs:
             fi
           else
             TARGETS_JSON=$(parse_targets_input "$INPUT")
+          fi
+
+          # Defensive fallback: ensure TARGETS_JSON is always valid JSON array.
+          if ! echo "$TARGETS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            TARGETS_JSON='[]'
           fi
 
           AXVISOR_ALL='[
