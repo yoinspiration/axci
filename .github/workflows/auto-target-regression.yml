@@ -1,0 +1,63 @@
+name: Auto Target Regression
+
+on:
+  pull_request:
+    paths:
+      - "tests.sh"
+      - "configs/test-target-rules.json"
+      - "scripts/**"
+      - "axci-affected/**"
+      - ".github/workflows/test.yml"
+      - ".github/workflows/auto-target-regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regress-auto-target:
+    name: Regress Auto Target Selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run regression script (explain mode)
+        id: regress
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEEP_TMP=1 bash scripts/regress_auto_target.sh --explain | tee regress.out
+
+          LOG_DIR="$(awk -F': ' '/日志目录/ {print $2}' regress.out | tail -n1 || true)"
+          if [[ -d "${LOG_DIR}" ]]; then
+            echo "log_dir=${LOG_DIR}" >> "$GITHUB_OUTPUT"
+          else
+            echo "log_dir=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Append summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Auto Target Regression"
+            echo ""
+            echo "Key output from \`scripts/regress_auto_target.sh --explain\`:"
+            echo ""
+            echo '```text'
+            sed -n '1,220p' regress.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-target-regression-output
+          path: |
+            regress.out
+            ${{ steps.regress.outputs.log_dir }}
+          if-no-files-found: ignore
