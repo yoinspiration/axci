@@ -37,6 +37,11 @@ on:
         required: false
         default: '["ubuntu-latest"]'
         type: string
+      axci_ref:
+        description: 'Git ref used to checkout yoinspiration/axci rules repository'
+        required: false
+        default: 'main'
+        type: string
 
 jobs:
   detect:
@@ -65,19 +70,12 @@ jobs:
           fetch-depth: 0
           path: component
 
-      - name: Resolve axci workflow ref
-        id: axci_ref
-        run: |
-          REF_PART="${{ github.workflow_ref }}"
-          REF_PART="${REF_PART##*@}"
-          echo "ref=$REF_PART" >> "$GITHUB_OUTPUT"
-
       - name: Checkout axci rules
         uses: actions/checkout@v4
         timeout-minutes: 10
         with:
           repository: yoinspiration/axci
-          ref: ${{ steps.axci_ref.outputs.ref }}
+          ref: ${{ inputs.axci_ref }}
           path: axci-rules
 
       - name: Install Rust for dependency-aware detection
