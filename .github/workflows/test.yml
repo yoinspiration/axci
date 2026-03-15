@@ -370,7 +370,13 @@ jobs:
             IS_AUTO=true
           fi
 
-          AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --argjson targets "$TARGETS_JSON" --arg runs_on_json "${{ inputs.runs_on }}" '
+          # Normalize runs_on input to a valid JSON string array.
+          RUNS_ON_JSON='${{ inputs.runs_on }}'
+          if ! echo "$RUNS_ON_JSON" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null 2>&1; then
+            RUNS_ON_JSON='["self-hosted","Linux","X64"]'
+          fi
+
+          AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --argjson targets "$TARGETS_JSON" --arg runs_on_json "$RUNS_ON_JSON" '
             if (($targets | index("all")) != null) or (($targets | index("axvisor")) != null) then
               map(
                 del(.target_key)
@@ -411,7 +417,7 @@ jobs:
 
           # Backward-compatibility: manual non-auto empty targets should still mean "all".
           if [ "$IS_AUTO" != "true" ] && [ "$(echo "$TARGETS_JSON" | jq 'length')" -eq 0 ]; then
-            AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --arg runs_on_json "${{ inputs.runs_on }}" '
+            AXVISOR_MATRIX=$(echo "$AXVISOR_ALL" | jq -c --arg runs_on_json "$RUNS_ON_JSON" '
               map(
                 del(.target_key)
                 | . + {
