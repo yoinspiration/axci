@@ -518,6 +518,11 @@ jobs:
           [ -d .git ] && git submodule deinit -f . || true
           [ -d .git/modules ] && rm -rf .git/modules || true
           [ -d .git ] && git clean -ffdx || true
+          # Remove leftover .cargo/ from previous runs that checked out
+          # directly to workspace root (e.g. old test-qemu.yml / test-board.yml).
+          # Without this, cargo walks up from ./axvisor/ and finds a second
+          # .cargo/config.toml here, doubling all rustflags → linker failures.
+          rm -rf .cargo
 
       - name: Harden git network settings
         run: |
