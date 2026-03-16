@@ -1,0 +1,1415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>axci — 依赖感知 CI 框架演示</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #1e2d45;
+    --accent: #3b82f6;
+    --accent2: #06b6d4;
+    --accent3: #10b981;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ─── NAV ─── */
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(10,14,26,.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 24px; height: 52px;
+    overflow-x: auto;
+  }
+  nav button {
+    background: none; border: none; cursor: pointer;
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    color: var(--muted); padding: 6px 14px; border-radius: 6px;
+    white-space: nowrap; transition: all .2s;
+    letter-spacing: .04em;
+  }
+  nav button:hover { color: var(--text); background: var(--surface2); }
+  nav button.active { color: var(--accent); background: rgba(59,130,246,.12); }
+  .nav-title {
+    font-size: 14px; font-weight: 800; color: var(--text);
+    letter-spacing: -.02em; margin-right: 16px; white-space: nowrap;
+  }
+  .nav-sep { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+
+  /* ─── SECTIONS ─── */
+  .section {
+    display: none; min-height: calc(100vh - 52px);
+    padding: 48px 40px;
+    animation: fadeIn .25s ease;
+  }
+  .section.active { display: block; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+  /* ─── TYPOGRAPHY ─── */
+  h1 { font-size: 48px; font-weight: 800; letter-spacing: -.04em; line-height: 1.1; }
+  h2 { font-size: 28px; font-weight: 800; letter-spacing: -.03em; margin-bottom: 28px; }
+  h3 { font-size: 16px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; color: var(--accent); margin-bottom: 12px; }
+  p { font-family: var(--mono); font-size: 14px; line-height: 1.7; color: var(--text); }
+  .muted { color: var(--muted); font-family: var(--mono); font-size: 13px; }
+
+  /* ─── CARDS ─── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .card.accent { border-color: rgba(59,130,246,.3); background: rgba(59,130,246,.06); }
+  .card.success { border-color: rgba(16,185,129,.3); background: rgba(16,185,129,.06); }
+  .card.warn { border-color: rgba(245,158,11,.3); background: rgba(245,158,11,.06); }
+  .card.danger { border-color: rgba(239,68,68,.3); background: rgba(239,68,68,.06); }
+
+  .grid { display: grid; gap: 16px; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+  /* ─── CODE ─── */
+  pre, code {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  pre {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    tab-size: 2;
+  }
+  .code-line { display: block; }
+  .c-kw { color: #ff7b72; }
+  .c-fn { color: #d2a8ff; }
+  .c-str { color: #a5d6ff; }
+  .c-num { color: #f2cc60; }
+  .c-cm { color: #8b949e; }
+  .c-ty { color: #ffa657; }
+  .c-op { color: #79c0ff; }
+  .c-lbl { color: #7ee787; }
+
+  /* ─── BADGE ─── */
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 3px 10px; border-radius: 20px; letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .badge.blue { background: rgba(59,130,246,.15); color: #93c5fd; border: 1px solid rgba(59,130,246,.3); }
+  .badge.cyan { background: rgba(6,182,212,.15); color: #67e8f9; border: 1px solid rgba(6,182,212,.3); }
+  .badge.green { background: rgba(16,185,129,.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,.3); }
+  .badge.amber { background: rgba(245,158,11,.15); color: #fcd34d; border: 1px solid rgba(245,158,11,.3); }
+  .badge.red { background: rgba(239,68,68,.15); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
+  .badge.gray { background: rgba(100,116,139,.15); color: #94a3b8; border: 1px solid rgba(100,116,139,.3); }
+  .dot { width:7px; height:7px; border-radius:50%; display:inline-block; }
+  .dot.green { background: #10b981; box-shadow: 0 0 8px #10b981; }
+  .dot.red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+  .dot.amber { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+
+  /* ─── FLOW DIAGRAM ─── */
+  .flow {
+    display: flex; align-items: stretch; gap: 0;
+    margin: 24px 0;
+  }
+  .flow-node {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 14px;
+    position: relative;
+    text-align: center;
+    transition: border-color .2s, transform .2s;
+    cursor: default;
+  }
+  .flow-node:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .flow-arrow {
+    display: flex; align-items: center; padding: 0 6px; color: var(--muted);
+    font-size: 18px; flex-shrink: 0;
+  }
+  .flow-node .fn-icon { font-size: 24px; margin-bottom: 6px; display: block; }
+  .flow-node .fn-title { font-size: 12px; font-weight: 700; font-family: var(--mono); letter-spacing: .04em; }
+  .flow-node .fn-sub { font-size: 11px; font-family: var(--mono); color: var(--muted); margin-top: 4px; }
+
+  /* ─── LAYER STACK ─── */
+  .layer-stack { display: flex; flex-direction: column; gap: 3px; }
+  .layer {
+    border-radius: 8px; padding: 16px 20px;
+    display: flex; align-items: center; gap: 16px;
+    border: 1px solid transparent;
+    transition: transform .15s;
+    cursor: default;
+  }
+  .layer:hover { transform: translateX(4px); }
+  .layer.l1 { background: linear-gradient(90deg, rgba(59,130,246,.12), rgba(59,130,246,.04)); border-color: rgba(59,130,246,.3); }
+  .layer.l2 { background: linear-gradient(90deg, rgba(6,182,212,.12), rgba(6,182,212,.04)); border-color: rgba(6,182,212,.3); }
+  .layer.l3 { background: linear-gradient(90deg, rgba(16,185,129,.12), rgba(16,185,129,.04)); border-color: rgba(16,185,129,.3); }
+  .layer-num { font-size: 32px; font-weight: 800; opacity: .25; font-family: var(--mono); min-width: 40px; }
+  .layer-body { flex: 1; }
+  .layer-title { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+  .layer-desc { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+  /* ─── SCENARIO PLAYGROUND ─── */
+  .file-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .file-tag {
+    font-family: var(--mono); font-size: 12px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 12px; cursor: pointer;
+    transition: all .15s;
+  }
+  .file-tag:hover { border-color: var(--accent); color: var(--accent); }
+  .file-tag.selected { background: rgba(59,130,246,.15); border-color: var(--accent); color: #93c5fd; }
+
+  .scenario-result {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    min-height: 120px;
+    transition: all .3s;
+  }
+  .scenario-result.skip { border-color: rgba(100,116,139,.4); background: rgba(100,116,139,.05); }
+  .scenario-result.full { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.05); }
+  .scenario-result.partial { border-color: rgba(16,185,129,.4); background: rgba(16,185,129,.05); }
+
+  .target-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 20px; padding: 4px 12px; margin: 4px;
+    transition: all .2s;
+  }
+  .target-chip.active { background: rgba(16,185,129,.12); border-color: rgba(16,185,129,.4); color: #6ee7b7; }
+  .target-chip.dimmed { opacity: .3; }
+  .target-chip .tc-type { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+
+  /* ─── BFS VISUALIZER ─── */
+  #bfs-canvas { border-radius: 10px; background: #0d1117; border: 1px solid var(--border); display: block; }
+
+  /* ─── STEP TIMELINE ─── */
+  .timeline { position: relative; padding-left: 24px; }
+  .timeline::before { content:''; position:absolute; left:7px; top:0; bottom:0; width:2px; background: var(--border); }
+  .tl-item { position: relative; margin-bottom: 16px; }
+  .tl-dot {
+    position: absolute; left: -24px; top: 4px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--border); border: 2px solid var(--surface);
+    transition: all .3s;
+  }
+  .tl-item.active .tl-dot { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .tl-item.done .tl-dot { background: var(--accent3); box-shadow: 0 0 8px var(--accent3); }
+  .tl-title { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .tl-body { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  /* ─── TABLE ─── */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th { text-align: left; padding: 10px 14px; background: var(--surface2); color: var(--muted); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
+  td { padding: 10px 14px; border-top: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: var(--surface2); }
+
+  /* ─── MISC ─── */
+  .flex { display: flex; }
+  .gap-16 { gap: 16px; }
+  .gap-24 { gap: 24px; }
+  .mt-16 { margin-top: 16px; }
+  .mt-24 { margin-top: 24px; }
+  .mt-32 { margin-top: 32px; }
+  .mb-8 { margin-bottom: 8px; }
+  .mb-16 { margin-bottom: 16px; }
+  .w-full { width: 100%; }
+  .tag { font-family: var(--mono); font-size: 11px; background: var(--surface2); padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); }
+
+  /* ─── PULSE ANIMATION ─── */
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+  .pulse { animation: pulse 2s infinite; }
+
+  /* ─── SECTION 1 HERO ─── */
+  .hero-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 48px; align-items: start;
+    max-width: 1200px; margin: 0 auto;
+  }
+  .problem-item {
+    display: flex; gap: 12px; padding: 12px;
+    border-radius: 8px; margin-bottom: 8px;
+    transition: background .15s;
+  }
+  .problem-item:hover { background: var(--surface2); }
+  .problem-icon { font-size: 20px; flex-shrink: 0; width: 32px; text-align: center; }
+  .kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 20px; }
+  .kpi { background: var(--surface2); border-radius: 10px; padding: 16px; text-align: center; border: 1px solid var(--border); }
+  .kpi-num { font-size: 36px; font-weight: 800; font-family: var(--mono); letter-spacing: -.04em; }
+  .kpi-label { font-size: 11px; font-family: var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+
+  /* ─── PROGRESS BAR ─── */
+  .pbar-wrap { background: var(--surface2); border-radius: 4px; height: 6px; margin-top: 6px; overflow: hidden; }
+  .pbar { height: 100%; border-radius: 4px; transition: width .8s ease; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="nav-title">axci</span>
+  <div class="nav-sep"></div>
+  <button class="active" onclick="show('intro')">01 · 背景</button>
+  <button onclick="show('arch')">02 · 架构</button>
+  <button onclick="show('engine')">03 · 引擎算法</button>
+  <button onclick="show('workflow')">04 · CI 编排</button>
+  <button onclick="show('axvisor')">05 · AxVisor 集成</button>
+  <button onclick="show('scenarios')">06 · 场景演示</button>
+  <button onclick="show('rules')">07 · 规则配置</button>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════ INTRO -->
+<section id="intro" class="section active">
+  <div class="hero-grid">
+    <div>
+      <div class="muted mb-8">依赖感知 CI 框架</div>
+      <h1 style="background:linear-gradient(135deg,#3b82f6,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent">
+        axci
+      </h1>
+      <p style="margin-top:16px;font-size:16px;line-height:1.8;max-width:520px">
+        智能分析代码变更与 Rust crate 依赖关系，<br>
+        <strong style="-webkit-text-fill-color:#e2e8f0">精确选择</strong>需要运行的测试目标，<br>
+        避免在昂贵的物理板卡上全量重复测试。
+      </p>
+
+      <div style="margin-top:32px">
+        <h3>核心痛点</h3>
+        <div class="problem-item">
+          <span class="problem-icon">🔧</span>
+          <div>
+            <div style="font-weight:700;margin-bottom:3px">物理板卡资源昂贵</div>
+            <div class="muted">Phytium、RK3568 板卡占用时间长，每次 push 全量跑浪费数小时</div>
+          </div>
+        </div>
+        <div class="problem-item">
+          <span class="problem-icon">📦</span>
+          <div>
+            <div style="font-weight:700;margin-bottom:3px">Monorepo 依赖复杂</div>
+            <div class="muted">修改一个 crate 可能影响多个下游，难以手动判断测试范围</div>
+          </div>
+        </div>
+        <div class="problem-item">
+          <span class="problem-icon">📝</span>
+          <div>
+            <div style="font-weight:700;margin-bottom:3px">文档改动无需测试</div>
+            <div class="muted">改 README.md 却触发全量 CI，占用排队资源</div>
+          </div>
+        </div>
+        <div class="problem-item">
+          <span class="problem-icon">🔄</span>
+          <div>
+            <div style="font-weight:700;margin-bottom:3px">规则难以复用</div>
+            <div class="muted">每个项目各自维护一套 CI 逻辑，无法统一更新和维护</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h3>axci 的答案</h3>
+      <div class="card accent" style="margin-bottom:16px">
+        <div style="font-size:14px;font-weight:700;margin-bottom:8px">⚡ 精确 vs 全量</div>
+        <p>只跑被变更代码实际影响到的测试目标，
+        无关目标完全跳过。</p>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div style="font-weight:700;margin-bottom:10px;font-size:13px">测试时间对比（典型 PR）</div>
+        <div style="font-family:var(--mono);font-size:12px;margin-bottom:8px;display:flex;justify-content:space-between">
+          <span>传统全量</span><span style="color:#ef4444">~3.5 小时</span>
+        </div>
+        <div class="pbar-wrap"><div class="pbar" style="background:#ef4444;width:100%"></div></div>
+        <div style="font-family:var(--mono);font-size:12px;margin-top:10px;margin-bottom:8px;display:flex;justify-content:space-between">
+          <span>axci 精确选择</span><span style="color:#10b981">~12 分钟</span>
+        </div>
+        <div class="pbar-wrap"><div class="pbar" style="background:#10b981;width:6%"></div></div>
+        <div class="muted" style="margin-top:8px">aarch64驱动文件修改场景（仅跑2个QEMU目标）</div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi">
+          <div class="kpi-num" style="color:#3b82f6">3</div>
+          <div class="kpi-label">架构层次</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-num" style="color:#06b6d4">7</div>
+          <div class="kpi-label">AxVisor 测试目标</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-num" style="color:#10b981">BFS</div>
+          <div class="kpi-label">传播算法</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-num" style="color:#f59e0b">⬇️</div>
+          <div class="kpi-label">Bash 兜底回退</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ ARCH -->
+<section id="arch" class="section">
+  <h2>三层架构设计</h2>
+
+  <div style="max-width:900px">
+    <div class="layer-stack">
+      <div class="layer l1">
+        <div class="layer-num">01</div>
+        <div class="layer-body">
+          <div class="layer-title">规则层 <span class="badge blue" style="margin-left:8px">configs/test-target-rules.json</span></div>
+          <div class="layer-desc">描述「哪些路径 / 哪些 crate → 触发哪些测试目标」。外置 JSON，业务差异在此收敛，不改代码逻辑。组件仓库可覆盖默认规则。</div>
+        </div>
+      </div>
+      <div style="text-align:center;font-size:20px;color:var(--muted);padding:4px">↕</div>
+
+      <div class="layer l2">
+        <div class="layer-num">02</div>
+        <div class="layer-body">
+          <div class="layer-title">分析引擎层 <span class="badge cyan" style="margin-left:8px">axci-affected</span> <span class="badge gray">affected_crates.sh</span></div>
+          <div class="layer-desc">① Rust 引擎（优先）：git diff + cargo metadata + BFS 依赖传播<br>② Bash 脚本（回退）：功能等价，依赖 jq，构建失败时自动降级</div>
+        </div>
+      </div>
+      <div style="text-align:center;font-size:20px;color:var(--muted);padding:4px">↕</div>
+
+      <div class="layer l3">
+        <div class="layer-num">03</div>
+        <div class="layer-body">
+          <div class="layer-title">编排层 <span class="badge green" style="margin-left:8px">.github/workflows/test.yml</span></div>
+          <div class="layer-desc">CI入口：detect job 将引擎输出转为 GitHub Actions matrix，驱动并行测试 job（axvisor / starry）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-32">
+      <h3>数据流</h3>
+      <div class="flow">
+        <div class="flow-node">
+          <span class="fn-icon">📁</span>
+          <div class="fn-title">git diff</div>
+          <div class="fn-sub">变更文件列表</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <span class="fn-icon">🦀</span>
+          <div class="fn-title">cargo metadata</div>
+          <div class="fn-sub">crate 前缀匹配</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <span class="fn-icon">🌊</span>
+          <div class="fn-title">BFS 传播</div>
+          <div class="fn-sub">反向依赖扩散</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <span class="fn-icon">📋</span>
+          <div class="fn-title">规则匹配</div>
+          <div class="fn-sub">选择测试目标</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="border-color:rgba(16,185,129,.4)">
+          <span class="fn-icon">✅</span>
+          <div class="fn-title">JSON 矩阵</div>
+          <div class="fn-sub">并行 CI job</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-24 grid grid-2 gap-16">
+      <div class="card">
+        <h3>引擎接口（Rust）</h3>
+        <pre><code><span class="c-cm"># 调用方式</span>
+<span class="c-lbl">axci-affected</span> &lt;repo_dir&gt; &lt;base_ref&gt; [rules_path]
+
+<span class="c-cm"># stdout: 机器可读 JSON</span>
+{
+  <span class="c-str">"skip_all"</span>: <span class="c-lbl">false</span>,
+  <span class="c-str">"targets"</span>: [
+    <span class="c-str">"axvisor-qemu-aarch64-arceos"</span>,
+    <span class="c-str">"axvisor-qemu-aarch64-linux"</span>
+  ]
+}
+
+<span class="c-cm"># stderr: 人工可读调试日志</span></code></pre>
+      </div>
+      <div class="card">
+        <h3>规则查找优先级</h3>
+        <div class="timeline" style="margin-top:8px">
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title"><span class="badge green">最高优先级</span></div>
+            <div class="tl-body">component/.github/axci-test-target-rules.json<br>（组件仓库自定义规则）</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-dot"></div>
+            <div class="tl-title"><span class="badge gray">默认回退</span></div>
+            <div class="tl-body">axci-rules/configs/test-target-rules.json<br>（axci 仓库通用规则）</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ ENGINE -->
+<section id="engine" class="section">
+  <h2>分析引擎核心算法</h2>
+
+  <div style="max-width:1100px">
+    <div class="grid grid-2 gap-24">
+      <!-- Left: algorithm steps -->
+      <div>
+        <h3>四步决策流程</h3>
+        <div class="timeline" id="algo-timeline">
+          <div class="tl-item active">
+            <div class="tl-dot"></div>
+            <div class="tl-title">① git_changed_files()</div>
+            <div class="tl-body">
+              <code>git diff --name-only &lt;base_ref&gt;</code><br>
+              回退：<code>HEAD~1</code>；失败则 skip_all
+            </div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-dot"></div>
+            <div class="tl-title">② compute_crates() — 前缀匹配</div>
+            <div class="tl-body">
+              cargo metadata 获取 workspace 成员路径<br>
+              对每个变更文件 → <strong>最长路径前缀匹配</strong> → changed_crates
+            </div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-dot"></div>
+            <div class="tl-title">③ BFS 反向依赖传播</div>
+            <div class="tl-body">
+              构建 rev_deps: <code>dep → [dependents]</code><br>
+              从 changed_crates 出发广度优先扩散 → affected_crates
+            </div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-dot"></div>
+            <div class="tl-title">④ decide_output() — 目标决策</div>
+            <div class="tl-body">
+              按优先级：skip → run_all → selection_rules →<br>
+              crate_rules → crate_path_rules → 兜底全量
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-16 card">
+          <h3>BFS 核心代码（简化）</h3>
+          <pre style="font-size:12px"><code><span class="c-cm">// 构建反向依赖图</span>
+<span class="c-kw">let mut</span> <span class="c-lbl">rev_deps</span>: HashMap&lt;_, Vec&lt;_&gt;&gt; = HashMap::new();
+<span class="c-kw">for</span> node <span class="c-kw">in</span> resolve.nodes {
+    <span class="c-kw">for</span> dep <span class="c-kw">in</span> node.deps {
+        rev_deps.entry(dep.name)
+            .or_default()
+            .push(node.id.name.clone());
+    }
+}
+
+<span class="c-cm">// BFS 传播</span>
+<span class="c-kw">let mut</span> queue = changed_crates.clone();
+<span class="c-kw">while let Some</span>(cur) = queue.pop_front() {
+    <span class="c-kw">if let Some</span>(dependents) = rev_deps.get(&amp;cur) {
+        <span class="c-kw">for</span> d <span class="c-kw">in</span> dependents {
+            <span class="c-kw">if</span> affected.insert(d.clone()) {
+                queue.push_back(d.clone());
+            }
+        }
+    }
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- Right: BFS visualizer -->
+      <div>
+        <h3>依赖图可视化 <span class="muted" style="text-transform:none;font-size:11px">— 点击节点模拟变更</span></h3>
+        <canvas id="bfs-canvas" width="480" height="320"></canvas>
+        <div id="bfs-info" class="card mt-16" style="min-height:80px">
+          <div class="muted" id="bfs-msg">点击一个节点，查看依赖传播效果</div>
+          <div id="bfs-result" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+
+        <div class="card mt-16">
+          <h3>decide_output() 决策树</h3>
+          <pre style="font-size:11px"><code>changed_files 为空?
+  └─ YES → <span class="c-lbl">skip_all = true</span>
+全是非代码文件?
+  └─ YES → <span class="c-lbl">skip_all = true</span>
+命中 run_all_patterns?
+  └─ YES → <span class="c-ty">return all_targets</span>
+changed_crates ∩ run_all_crates ≠ ∅?
+  └─ YES → <span class="c-ty">return all_targets</span>
+逐条评估规则 → selected[]
+  selection_rules  (路径匹配)
+  crate_rules      (crate + BFS)
+  crate_path_rules (crate + 路径联合)
+selected 为空?
+  └─ YES → <span class="c-warn">兜底: return all_targets</span>
+  └─ NO  → <span class="c-lbl">return sorted(selected)</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ WORKFLOW -->
+<section id="workflow" class="section">
+  <h2>CI 编排：test.yml detect job</h2>
+
+  <div style="max-width:1100px">
+    <div class="grid grid-2 gap-24">
+      <div>
+        <h3>detect job 步骤流程</h3>
+        <div class="timeline">
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">1. Checkout component</div>
+            <div class="tl-body">调用者仓库的代码 → <code>./component/</code></div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">2. Checkout axci-rules</div>
+            <div class="tl-body">axci 仓库（含引擎 + 规则）→ <code>./axci-rules/</code></div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">3. 安装 Rust + 构建引擎</div>
+            <div class="tl-body">
+              <code>cargo build --release</code> axci-affected<br>
+              <span class="badge green">continue-on-error</span> 失败后自动降级到 Bash
+            </div>
+          </div>
+          <div class="tl-item active">
+            <div class="tl-dot"></div>
+            <div class="tl-title">4. Build dynamic matrix（核心）</div>
+            <div class="tl-body">引擎输出 → 过滤 AXVISOR_ALL → 生成 matrix JSON</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-dot"></div>
+            <div class="tl-title">5. Write step summary</div>
+            <div class="tl-body">在 Actions 页面输出决策报告（selection_mode / auto_reason / targets）</div>
+          </div>
+        </div>
+
+        <div class="card mt-16">
+          <h3>detect job 输出变量</h3>
+          <table>
+            <tr><th>变量</th><th>含义</th></tr>
+            <tr><td><code>axvisor_matrix</code></td><td>JSON 数组，每条一个测试 job</td></tr>
+            <tr><td><code>skip_all</code></td><td>是否跳过所有测试</td></tr>
+            <tr><td><code>selection_mode</code></td><td>all / subset / auto-skip 等</td></tr>
+            <tr><td><code>auto_reason</code></td><td>自动选择原因（调试用）</td></tr>
+            <tr><td><code>resolved_targets</code></td><td>最终解析的目标 key 列表</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <h3>触发场景 × 行为差异</h3>
+        <table style="margin-bottom:16px">
+          <tr><th>触发方式</th><th>test_targets</th><th>base_ref</th></tr>
+          <tr>
+            <td><span class="badge blue">push master</span></td>
+            <td><code>auto</code></td>
+            <td><code>event.before</code> (前一 SHA)</td>
+          </tr>
+          <tr>
+            <td><span class="badge cyan">pull_request</span></td>
+            <td><code>auto</code></td>
+            <td><code>origin/master</code></td>
+          </tr>
+          <tr>
+            <td><span class="badge amber">workflow_dispatch</span></td>
+            <td>用户输入</td>
+            <td>用户输入</td>
+          </tr>
+          <tr>
+            <td><span class="badge amber">dispatch: all</span></td>
+            <td><code>all</code></td>
+            <td>无关</td>
+          </tr>
+          <tr>
+            <td><span class="badge amber">dispatch: 单 key</span></td>
+            <td>具体 key</td>
+            <td>无关</td>
+          </tr>
+        </table>
+
+        <h3>axvisor job 矩阵条目</h3>
+        <pre style="font-size:11px"><code><span class="c-cm">// 7 个测试目标</span>
+[
+ {<span class="c-str">"type"</span>:<span class="c-str">"qemu"</span>,<span class="c-str">"arch"</span>:<span class="c-str">"aarch64"</span>,
+  <span class="c-str">"vmconfigs_name"</span>:<span class="c-str">"ArceOS"</span>,
+  <span class="c-str">"target_key"</span>:<span class="c-str">"axvisor-qemu-aarch64-arceos"</span>},
+ {<span class="c-str">"type"</span>:<span class="c-str">"qemu"</span>,<span class="c-str">"arch"</span>:<span class="c-str">"aarch64"</span>,
+  <span class="c-str">"vmconfigs_name"</span>:<span class="c-str">"Linux"</span>,
+  <span class="c-str">"target_key"</span>:<span class="c-str">"axvisor-qemu-aarch64-linux"</span>},
+ {<span class="c-str">"type"</span>:<span class="c-str">"qemu"</span>,<span class="c-str">"arch"</span>:<span class="c-str">"x86_64"</span>,
+  <span class="c-str">"vmconfigs_name"</span>:<span class="c-str">"NimbOS"</span>,
+  <span class="c-str">"target_key"</span>:<span class="c-str">"axvisor-qemu-x86_64-nimbos"</span>},
+ {<span class="c-str">"type"</span>:<span class="c-str">"board"</span>,<span class="c-str">"board"</span>:<span class="c-str">"phytiumpi"</span>,
+  <span class="c-str">"vmconfigs_name"</span>:<span class="c-str">"ArceOS"</span>,
+  <span class="c-str">"target_key"</span>:<span class="c-str">"axvisor-board-phytiumpi-arceos"</span>},
+ ...
+]</code></pre>
+
+        <div class="card warn mt-16">
+          <div style="font-weight:700;margin-bottom:6px">⚠️ 已修复：链接器 flag 翻倍</div>
+          <p style="font-size:12px">
+            self-hosted runner 上遗留的 <code>.cargo/config.toml</code>（来自旧 test-qemu.yml）与
+            <code>axvisor/</code> 子目录的 config 合并 → rustflags 翻倍 → 链接失败。
+            <br>修复：cleanup 步骤中加入 <code>rm -rf .cargo</code>。
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ AXVISOR -->
+<section id="axvisor" class="section">
+  <h2>AxVisor 集成全流程</h2>
+  <div style="max-width:1100px">
+    <div class="grid grid-2 gap-24 mb-16">
+      <div>
+        <h3>axvisor/test.yml（主测试入口）</h3>
+        <pre style="font-size:12px"><code><span class="c-kw">on</span>:
+  push:    { branches: [master] }
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      test_targets: { default: <span class="c-str">'auto'</span> }
+      base_ref:     { default: <span class="c-str">'origin/master'</span> }
+      runs_on:      { default: <span class="c-str">'["self-hosted","X64"]'</span> }
+
+<span class="c-kw">jobs</span>:
+  <span class="c-lbl">test</span>:
+    uses: <span class="c-str">yoinspiration/axci/.github/workflows/test.yml</span>
+          <span class="c-str">@test/auto-target-regression</span>
+    with:
+      crate_name:   <span class="c-str">"axvisor"</span>
+      test_targets: <span class="c-num">${{ inputs || 'auto' }}</span>
+      base_ref:     <span class="c-num">${{ event.before || 'origin/master' }}</span>
+      axci_ref:     <span class="c-str">"test/auto-target-regression"</span>
+      axvisor_repo: <span class="c-str">"yoinspiration/axvisor"</span>
+      axvisor_ref:  <span class="c-num">${{ github.ref_name }}</span>
+                    <span class="c-cm">↑ 测试当前分支</span></code></pre>
+
+        <div class="card mt-16">
+          <h3>Cargo 配置（.cargo/config.toml）</h3>
+          <pre style="font-size:12px"><code>[target.aarch64-unknown-none-softfloat]
+rustflags = [
+    <span class="c-str">"-Crelocation-model=static"</span>,
+    <span class="c-str">"-Clink-args=-no-pie"</span>,
+    <span class="c-str">"-Clink-args=-Taxplat.x"</span>,  <span class="c-cm"># axplat-dyn 提供</span>
+]
+
+[target.x86_64-unknown-none]
+rustflags = [
+    <span class="c-str">"-Clink-args=-no-pie"</span>,
+    <span class="c-str">"-Clink-args=-Tlink.x"</span>,
+]
+
+[target.'cfg(target_os = "none")']
+runner = <span class="c-str">"cargo osrun"</span>  <span class="c-cm"># 嵌入式运行器</span>
+
+[alias]
+xtask = <span class="c-str">"run --bin xtask --features xtask --"</span></code></pre>
+        </div>
+      </div>
+
+      <div>
+        <h3>axvisor job 每步详解</h3>
+        <div class="timeline">
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">① Clean up workspace</div>
+            <div class="tl-body"><code>git clean -ffdx</code> + <code style="color:#f59e0b">rm -rf .cargo</code><br>清除遗留 config，防止 rustflags 翻倍</div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">② Checkout component → ./component/</div>
+            <div class="tl-body">被测组件（本次 PR 的代码）</div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">③ Checkout axvisor → ./axvisor/</div>
+            <div class="tl-body">测试平台，<code>axvisor_ref=github.ref_name</code>，含子模块</div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">④ Install Rust nightly + ostool</div>
+            <div class="tl-body">targets: aarch64-unknown-none-softfloat, x86_64-unknown-none</div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">⑤ Resolve + Apply patch</div>
+            <div class="tl-body"><code>cargo metadata</code> 定位 crate 路径<br>
+            在 axvisor/Cargo.toml 追加：<br>
+            <code>[patch.crates-io] axvisor = {path="…/component"}</code></div>
+          </div>
+          <div class="tl-item done">
+            <div class="tl-dot"></div>
+            <div class="tl-title">⑥ Download images（QEMU only）</div>
+            <div class="tl-body"><code>cargo xtask image download &lt;vmimage_name&gt;</code><br>更新 kernel_path / rootfs 路径</div>
+          </div>
+          <div class="tl-item active">
+            <div class="tl-dot"></div>
+            <div class="tl-title">⑦ Run QEMU / Board tests</div>
+            <div class="tl-body">
+              QEMU: <code>cargo xtask qemu --build-config ... --qemu-config ... --vmconfigs ...</code><br>
+              Board: <code>cargo xtask uboot ... --bin-dir /home/runner/tftp</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom:12px">axplat-dyn 与链接脚本关系</h3>
+      <div class="flex gap-16" style="align-items:flex-start;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <p style="font-size:13px">axplat-dyn 的 build.rs 在编译时生成 <code>axplat.x</code> → OUT_DIR，提供给链接器。<code>axplat.x</code> 内部 <code>INCLUDE "link.x"</code>，而 <code>link.x</code> 由 somehal/someboot 提供。</p>
+        </div>
+        <pre style="flex:2;min-width:300px;font-size:12px"><code><span class="c-cm">// axplat-dyn/build.rs</span>
+<span class="c-kw">fn</span> <span class="c-fn">main</span>() {
+    <span class="c-kw">let</span> ld = include_str!(<span class="c-str">"link.ld"</span>);
+    println!(<span class="c-str">"cargo:rustc-link-search={}"</span>, out_dir);
+    <span class="c-cm">// axplat.x 内: INCLUDE "link.x"</span>
+    fs::write(out_dir.join(<span class="c-str">"axplat.x"</span>), ld).unwrap();
+}</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ SCENARIOS -->
+<section id="scenarios" class="section">
+  <h2>场景演示 — 点击文件查看测试决策</h2>
+
+  <div style="max-width:1100px">
+    <div class="grid grid-2 gap-24">
+      <div>
+        <h3>选择变更文件</h3>
+        <div class="file-tags" id="file-tags">
+          <div class="file-tag" data-scenario="readme">📄 README.md</div>
+          <div class="file-tag" data-scenario="license">📄 LICENSE</div>
+          <div class="file-tag" data-scenario="cargo_toml">📦 Cargo.toml</div>
+          <div class="file-tag" data-scenario="cargo_lock">📦 Cargo.lock</div>
+          <div class="file-tag" data-scenario="workflow">⚙️ .github/workflows/test.yml</div>
+          <div class="file-tag" data-scenario="aarch64_arch">🔧 kernel/src/hal/arch/aarch64/exception.rs</div>
+          <div class="file-tag" data-scenario="x86_arch">🔧 kernel/src/hal/arch/x86_64/interrupt.rs</div>
+          <div class="file-tag" data-scenario="axruntime">⚡ src/axruntime/lib.rs (crate: axruntime)</div>
+          <div class="file-tag" data-scenario="phytium_driver">🔌 src/driver/soc/phytium-e2000/uart.rs</div>
+          <div class="file-tag" data-scenario="rk3568_driver">🔌 src/driver/soc/rockchip/rk3568-clk.rs</div>
+          <div class="file-tag" data-scenario="generic_driver">🔌 src/driver/blk/virtio.rs</div>
+          <div class="file-tag" data-scenario="unknown">❓ src/misc/some_feature.rs</div>
+        </div>
+
+        <div id="scenario-result" class="scenario-result">
+          <div class="muted">← 点击文件查看决策过程</div>
+        </div>
+      </div>
+
+      <div>
+        <h3>测试目标状态</h3>
+        <div id="target-grid" style="margin-top:8px">
+          <div style="margin-bottom:10px">
+            <div class="muted" style="font-size:11px;margin-bottom:6px">QEMU 目标</div>
+            <div class="target-chip" data-target="axvisor-qemu-aarch64-arceos">
+              <span>🖥️ qemu-aarch64</span>
+              <span class="badge cyan" style="font-size:9px">ArceOS</span>
+            </div>
+            <div class="target-chip" data-target="axvisor-qemu-aarch64-linux">
+              <span>🖥️ qemu-aarch64</span>
+              <span class="badge blue" style="font-size:9px">Linux</span>
+            </div>
+            <div class="target-chip" data-target="axvisor-qemu-x86_64-nimbos">
+              <span>🖥️ qemu-x86_64</span>
+              <span class="badge amber" style="font-size:9px">NimbOS</span>
+            </div>
+          </div>
+          <div>
+            <div class="muted" style="font-size:11px;margin-bottom:6px">物理板卡目标</div>
+            <div class="target-chip" data-target="axvisor-board-phytiumpi-arceos">
+              <span>🔋 phytiumpi</span>
+              <span class="badge cyan" style="font-size:9px">ArceOS</span>
+            </div>
+            <div class="target-chip" data-target="axvisor-board-phytiumpi-linux">
+              <span>🔋 phytiumpi</span>
+              <span class="badge blue" style="font-size:9px">Linux</span>
+            </div>
+            <div class="target-chip" data-target="axvisor-board-roc-rk3568-pc-arceos">
+              <span>🔋 rk3568-pc</span>
+              <span class="badge cyan" style="font-size:9px">ArceOS</span>
+            </div>
+            <div class="target-chip" data-target="axvisor-board-roc-rk3568-pc-linux">
+              <span>🔋 rk3568-pc</span>
+              <span class="badge blue" style="font-size:9px">Linux</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mt-16" id="decision-detail" style="display:none">
+          <h3>决策路径</h3>
+          <div id="decision-path" style="font-family:var(--mono);font-size:12px;line-height:1.8"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scenario summary table -->
+    <div class="mt-32">
+      <h3>所有场景汇总</h3>
+      <table>
+        <tr>
+          <th>变更文件</th>
+          <th>决策原因</th>
+          <th>触发目标</th>
+          <th>节省</th>
+        </tr>
+        <tr>
+          <td><code>README.md</code></td>
+          <td>non_code (.md)</td>
+          <td><span class="badge gray">跳过全部</span></td>
+          <td><span style="color:#10b981">100%</span></td>
+        </tr>
+        <tr>
+          <td><code>Cargo.toml</code></td>
+          <td>run_all_patterns</td>
+          <td><span class="badge amber">全量 7 个</span></td>
+          <td>0%</td>
+        </tr>
+        <tr>
+          <td><code>kernel/src/hal/arch/aarch64/*</code></td>
+          <td>selection_rules[aarch64_path]（排除 kernel 全量）</td>
+          <td><span class="badge green">aarch64 全部（5个）</span></td>
+          <td><span style="color:#10b981">28%</span></td>
+        </tr>
+        <tr>
+          <td><code>kernel/src/hal/arch/x86_64/*</code></td>
+          <td>selection_rules[x86_64_path]</td>
+          <td><span class="badge cyan">qemu-x86_64-nimbos（1个）</span></td>
+          <td><span style="color:#10b981">86%</span></td>
+        </tr>
+        <tr>
+          <td><code>crate: axruntime</code></td>
+          <td>run_all_crates（核心 crate）</td>
+          <td><span class="badge amber">全量 7 个</span></td>
+          <td>0%</td>
+        </tr>
+        <tr>
+          <td><code>driver/soc/phytium-e2000/*</code></td>
+          <td>crate_path_rules[driver_phytium]</td>
+          <td><span class="badge blue">phytiumpi × 2</span></td>
+          <td><span style="color:#10b981">71%</span></td>
+        </tr>
+        <tr>
+          <td><code>driver/soc/rockchip/*</code></td>
+          <td>crate_path_rules[driver_rockchip]</td>
+          <td><span class="badge blue">rk3568-pc × 2</span></td>
+          <td><span style="color:#10b981">71%</span></td>
+        </tr>
+        <tr>
+          <td><code>driver/blk/virtio.rs</code></td>
+          <td>crate_path_rules[driver_generic] (*)</td>
+          <td><span class="badge blue">全部 board × 4</span></td>
+          <td><span style="color:#10b981">43%</span></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════ RULES -->
+<section id="rules" class="section">
+  <h2>规则配置详解</h2>
+
+  <div style="max-width:1100px">
+    <div class="grid grid-2 gap-24">
+      <div>
+        <h3>规则层次</h3>
+        <div class="card mb-16">
+          <div style="font-weight:700;margin-bottom:8px">非代码文件（无条件跳过）</div>
+          <pre style="font-size:12px"><code>"non_code": {
+  "dirs":  [<span class="c-str">"doc/"</span>, <span class="c-str">"docs/"</span>],
+  "exts":  [<span class="c-str">".md"</span>, <span class="c-str">".txt"</span>, <span class="c-str">".png"</span>, ...],
+  "files": [<span class="c-str">"LICENSE"</span>, <span class="c-str">".gitignore"</span>]
+}</code></pre>
+        </div>
+
+        <div class="card mb-16">
+          <div style="font-weight:700;margin-bottom:8px">全量触发模式（run_all_patterns）</div>
+          <pre style="font-size:12px"><code>[
+  <span class="c-str">"Cargo.toml"</span>,       <span class="c-cm">// workspace manifest</span>
+  <span class="c-str">"Cargo.lock"</span>,
+  <span class="c-str">"rust-toolchain.toml"</span>,
+  <span class="c-str">"xtask/*"</span>,           <span class="c-cm">// build system</span>
+  <span class="c-str">"kernel/*"</span>           <span class="c-cm">// 整个 kernel</span>
+]
+"run_all_exclude_patterns": [
+  <span class="c-str">"kernel/src/hal/arch/*"</span> <span class="c-cm">// 但排除架构子目录</span>
+]</code></pre>
+        </div>
+
+        <div class="card">
+          <div style="font-weight:700;margin-bottom:8px">精确路径规则（selection_rules）</div>
+          <table>
+            <tr><th>规则 ID</th><th>匹配路径</th><th>目标</th></tr>
+            <tr><td><code>aarch64_path</code></td><td><code>kernel/src/hal/arch/aarch64/*</code><br><code>configs/board/qemu-aarch64.toml</code></td><td>aarch64全部（5个）</td></tr>
+            <tr><td><code>x86_64_path</code></td><td><code>kernel/src/hal/arch/x86_64/*</code><br><code>platform/x86-qemu-q35/*</code></td><td>qemu-x86_64-nimbos</td></tr>
+            <tr><td><code>phytium_path</code></td><td><code>*phytium*</code>, <code>*e2000*</code></td><td>phytiumpi×2</td></tr>
+            <tr><td><code>rk3568_path</code></td><td><code>*rk3568*</code>, <code>*rockchip*</code></td><td>rk3568-pc×2</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <h3>crate 级规则</h3>
+        <div class="card mb-16">
+          <div style="font-weight:700;margin-bottom:8px">全量触发 crate（run_all_crates）</div>
+          <div class="muted" style="font-size:12px;margin-bottom:8px">
+            只要这些 crate 出现在 <code>changed_crates</code>（直接修改），立即全量
+          </div>
+          <div>
+            <span class="badge amber">axruntime</span>
+            <span class="badge amber" style="margin-left:6px">axconfig</span>
+          </div>
+        </div>
+
+        <div class="card mb-16">
+          <div style="font-weight:700;margin-bottom:8px">crate_rules（crate 精确匹配）</div>
+          <pre style="font-size:12px"><code>{
+  "id": <span class="c-str">"crate_x86_platform"</span>,
+  "crates": [<span class="c-str">"axplat-x86-qemu-q35"</span>],
+  "targets": [<span class="c-str">"axvisor-qemu-x86_64-nimbos"</span>],
+  "direct_only": <span class="c-lbl">false</span>  <span class="c-cm">// 用 affected_crates</span>
+}</code></pre>
+        </div>
+
+        <div class="card">
+          <div style="font-weight:700;margin-bottom:8px">crate_path_rules（crate + 路径联合）</div>
+          <div class="muted" style="font-size:12px;margin-bottom:8px">
+            必须同时满足：crate 命中 AND 文件路径匹配，顺序评估，首命中即停
+          </div>
+          <pre style="font-size:12px"><code>[
+  { "id": <span class="c-str">"driver_phytium"</span>,
+    "crates": [<span class="c-str">"driver"</span>],
+    "path_patterns": [<span class="c-str">"*phytium*"</span>, <span class="c-str">"*e2000*"</span>],
+    "targets": [<span class="c-str">"phytiumpi-arceos"</span>, <span class="c-str">"phytiumpi-linux"</span>] },
+  { "id": <span class="c-str">"driver_rockchip"</span>,
+    "crates": [<span class="c-str">"driver"</span>],
+    "path_patterns": [<span class="c-str">"*rk3568*"</span>],
+    "targets": [<span class="c-str">"roc-rk3568-arceos"</span>, <span class="c-str">"roc-rk3568-linux"</span>] },
+  { "id": <span class="c-str">"driver_generic"</span>,  <span class="c-cm">// 兜底</span>
+    "crates": [<span class="c-str">"driver"</span>],
+    "path_patterns": [<span class="c-str">"*"</span>],
+    "targets": [<span class="c-str">"全部 board 目标"</span>] }
+]</code></pre>
+        </div>
+
+        <div class="card success mt-16">
+          <div style="font-weight:700;margin-bottom:6px">✅ 设计亮点：双重兜底安全网</div>
+          <p style="font-size:13px">
+            1. <strong>规则不匹配</strong>时回退到全量测试（no_match_fallback_all），永不遗漏<br>
+            2. <strong>Rust 引擎失败</strong>时自动降级到 Bash 脚本，CI 不中断<br>
+            3. crate_path_rules 的 <code>*</code> 通配兜底，通用驱动变更触发全部板卡
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+// ─── NAV ───────────────────────────────────────────────
+function show(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  const idx = ['intro','arch','engine','workflow','axvisor','scenarios','rules'].indexOf(id);
+  document.querySelectorAll('nav button')[idx].classList.add('active');
+  if (id === 'engine') initBFS();
+}
+
+// ─── BFS VISUALIZER ────────────────────────────────────
+let bfsInitialized = false;
+const nodes = [
+  { id: 'axconfig',   x: 240, y: 280, color: '#f59e0b', label: 'axconfig' },
+  { id: 'axruntime',  x: 120, y: 190, color: '#ef4444', label: 'axruntime' },
+  { id: 'axhal',      x: 360, y: 190, color: '#3b82f6', label: 'axhal' },
+  { id: 'axdriver',   x: 240, y: 130, color: '#06b6d4', label: 'axdriver' },
+  { id: 'axmm',       x: 80,  y: 90,  color: '#8b5cf6', label: 'axmm' },
+  { id: 'axvisor',    x: 400, y: 90,  color: '#10b981', label: 'axvisor' },
+  { id: 'axstd',      x: 130, y: 40,  color: '#10b981', label: 'axstd' },
+];
+// deps: [from, to] means 'to' depends on 'from'
+const edges = [
+  ['axconfig', 'axruntime'], ['axconfig', 'axhal'],
+  ['axhal', 'axdriver'], ['axhal', 'axmm'],
+  ['axruntime', 'axstd'], ['axdriver', 'axvisor'],
+  ['axmm', 'axstd'], ['axstd', 'axvisor'],
+];
+// Build reverse dep graph
+const revDeps = {};
+nodes.forEach(n => revDeps[n.id] = []);
+edges.forEach(([from, to]) => revDeps[from].push(to));
+
+let selectedNode = null;
+let affectedSet = new Set();
+
+function bfsDeps(start) {
+  const visited = new Set([start]);
+  const queue = [start];
+  while (queue.length) {
+    const cur = queue.shift();
+    (revDeps[cur] || []).forEach(d => {
+      if (!visited.has(d)) { visited.add(d); queue.push(d); }
+    });
+  }
+  return visited;
+}
+
+function initBFS() {
+  if (bfsInitialized) return;
+  bfsInitialized = true;
+  const canvas = document.getElementById('bfs-canvas');
+  const ctx = canvas.getContext('2d');
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // edges
+    edges.forEach(([from, to]) => {
+      const f = nodes.find(n => n.id === from);
+      const t = nodes.find(n => n.id === to);
+      ctx.beginPath();
+      ctx.moveTo(f.x, f.y);
+      ctx.lineTo(t.x, t.y);
+      const isHighlighted = affectedSet.has(from) && affectedSet.has(to);
+      ctx.strokeStyle = isHighlighted ? 'rgba(16,185,129,.6)' : 'rgba(255,255,255,.1)';
+      ctx.lineWidth = isHighlighted ? 2 : 1;
+      ctx.stroke();
+      // arrowhead
+      if (isHighlighted) {
+        const angle = Math.atan2(t.y - f.y, t.x - f.x);
+        const mx = (f.x + t.x) / 2, my = (f.y + t.y) / 2;
+        ctx.save();
+        ctx.translate(mx, my);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(-8, -4);
+        ctx.lineTo(-8, 4);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(16,185,129,.7)';
+        ctx.fill();
+        ctx.restore();
+      }
+    });
+    // nodes
+    nodes.forEach(n => {
+      const isSelected = n.id === selectedNode;
+      const isAffected = affectedSet.has(n.id) && !isSelected;
+      const isDimmed = selectedNode && !affectedSet.has(n.id);
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, isSelected ? 22 : 16, 0, Math.PI * 2);
+      const alpha = isDimmed ? .2 : 1;
+      ctx.fillStyle = isSelected
+        ? n.color
+        : isAffected
+        ? n.color + 'cc'
+        : n.color + (isDimmed ? '33' : '44');
+      ctx.fill();
+      if (isSelected || isAffected) {
+        ctx.strokeStyle = n.color;
+        ctx.lineWidth = isSelected ? 3 : 2;
+        ctx.stroke();
+        if (isSelected) {
+          ctx.shadowColor = n.color;
+          ctx.shadowBlur = 16;
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+        }
+      }
+      ctx.fillStyle = isDimmed ? 'rgba(255,255,255,.2)' : '#fff';
+      ctx.font = isSelected ? 'bold 12px JetBrains Mono' : '11px JetBrains Mono';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(n.label, n.x, n.y);
+    });
+  }
+
+  canvas.onclick = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const hit = nodes.find(n => Math.hypot(n.x - mx, n.y - my) < 22);
+    if (hit) {
+      selectedNode = hit.id;
+      affectedSet = bfsDeps(hit.id);
+      // update info
+      document.getElementById('bfs-msg').textContent = `变更了 "${hit.label}" → 受影响的 crate：`;
+      const res = document.getElementById('bfs-result');
+      res.innerHTML = '';
+      affectedSet.forEach(id => {
+        const n = nodes.find(x => x.id === id);
+        const b = document.createElement('span');
+        b.className = 'badge ' + (id === selectedNode ? 'amber' : 'green');
+        b.textContent = id === selectedNode ? `📝 ${id}` : `⬆ ${id}`;
+        res.appendChild(b);
+      });
+    } else {
+      selectedNode = null;
+      affectedSet = new Set();
+      document.getElementById('bfs-msg').textContent = '点击一个节点，查看依赖传播效果';
+      document.getElementById('bfs-result').innerHTML = '';
+    }
+    draw();
+  };
+
+  draw();
+}
+
+// ─── SCENARIOS ──────────────────────────────────────────
+const SCENARIOS = {
+  readme: {
+    cls: 'skip',
+    reason: '📄 .md 文件命中 non_code.exts',
+    decision: [
+      '① 检测变更文件: README.md',
+      '② 判断: 扩展名 .md ∈ non_code.exts',
+      '③ 所有变更均为非代码文件',
+      '→ <span style="color:#94a3b8">skip_all = true，跳过全部测试</span>',
+    ],
+    targets: [],
+  },
+  license: {
+    cls: 'skip',
+    reason: '📄 LICENSE 命中 non_code.files',
+    decision: [
+      '① 检测变更文件: LICENSE',
+      '② 判断: "LICENSE" ∈ non_code.files',
+      '③ 所有变更均为非代码文件',
+      '→ <span style="color:#94a3b8">skip_all = true，跳过全部测试</span>',
+    ],
+    targets: [],
+  },
+  cargo_toml: {
+    cls: 'full',
+    reason: '⚡ Cargo.toml 命中 run_all_patterns',
+    decision: [
+      '① 检测变更文件: Cargo.toml',
+      '② 非代码检查: 不是非代码文件',
+      '③ run_all_patterns 检查: "Cargo.toml" ∈ run_all_patterns',
+      '→ <span style="color:#f59e0b">needs_all = true，触发全量 7 个目标</span>',
+    ],
+    targets: ['all'],
+  },
+  cargo_lock: {
+    cls: 'full',
+    reason: '⚡ Cargo.lock 命中 run_all_patterns',
+    decision: [
+      '① 检测变更文件: Cargo.lock',
+      '② run_all_patterns 检查: "Cargo.lock" ∈ run_all_patterns',
+      '→ <span style="color:#f59e0b">全量测试</span>',
+    ],
+    targets: ['all'],
+  },
+  workflow: {
+    cls: 'full',
+    reason: '⚡ workflow 文件命中 run_all_patterns (.github/workflows/*)',
+    decision: [
+      '① 变更文件: .github/workflows/test.yml',
+      '② run_all_patterns: 匹配 ".github/workflows/*" glob',
+      '→ <span style="color:#f59e0b">全量测试</span>',
+    ],
+    targets: ['all'],
+  },
+  aarch64_arch: {
+    cls: 'partial',
+    reason: '🎯 selection_rules[aarch64_path] — aarch64 架构文件',
+    decision: [
+      '① 变更文件: kernel/src/hal/arch/aarch64/exception.rs',
+      '② run_all_patterns: "kernel/*" 本应匹配...',
+      '   但 run_all_exclude_patterns 排除了 "kernel/src/hal/arch/*"',
+      '③ selection_rules[aarch64_path]: 匹配 "kernel/src/hal/arch/aarch64/*"',
+      '→ <span style="color:#6ee7b7">精确选择: aarch64 全部（qemu×2 + phytiumpi×2 + rk3568×1 = 5个）</span>',
+    ],
+    targets: [
+      'axvisor-qemu-aarch64-arceos',
+      'axvisor-qemu-aarch64-linux',
+      'axvisor-board-phytiumpi-arceos',
+      'axvisor-board-phytiumpi-linux',
+      'axvisor-board-roc-rk3568-pc-arceos',
+      'axvisor-board-roc-rk3568-pc-linux',
+    ],
+  },
+  x86_arch: {
+    cls: 'partial',
+    reason: '🎯 selection_rules[x86_64_path] — x86_64 架构文件',
+    decision: [
+      '① 变更文件: kernel/src/hal/arch/x86_64/interrupt.rs',
+      '② run_all_exclude_patterns 排除 "kernel/src/hal/arch/*"',
+      '③ selection_rules[x86_64_path]: 匹配 "kernel/src/hal/arch/x86_64/*"',
+      '→ <span style="color:#67e8f9">精确选择: axvisor-qemu-x86_64-nimbos（1个）</span>',
+    ],
+    targets: ['axvisor-qemu-x86_64-nimbos'],
+  },
+  axruntime: {
+    cls: 'full',
+    reason: '⚡ run_all_crates — 核心 crate axruntime 直接变更',
+    decision: [
+      '① 变更文件: src/axruntime/lib.rs',
+      '② 路径匹配 crate: axruntime',
+      '③ changed_crates = {axruntime}',
+      '④ run_all_crates = ["axruntime", "axconfig"]',
+      '   {axruntime} ∩ run_all_crates ≠ ∅',
+      '→ <span style="color:#f59e0b">全量测试（核心 crate 变更，影响面未知）</span>',
+    ],
+    targets: ['all'],
+  },
+  phytium_driver: {
+    cls: 'partial',
+    reason: '🎯 crate_path_rules[driver_phytium] — Phytium 驱动',
+    decision: [
+      '① 变更文件: src/driver/soc/phytium-e2000/uart.rs',
+      '② crate 识别: phytium-e2000 → 属于 driver crate',
+      '③ BFS 扩散: changed={driver}, affected={driver, axvisor}',
+      '④ crate_path_rules 匹配:',
+      '   crate="driver" AND 路径匹配 "*phytium*"',
+      '   → 命中 driver_phytium 规则',
+      '→ <span style="color:#6ee7b7">精确选择: phytiumpi-arceos, phytiumpi-linux（2个）</span>',
+    ],
+    targets: ['axvisor-board-phytiumpi-arceos', 'axvisor-board-phytiumpi-linux'],
+  },
+  rk3568_driver: {
+    cls: 'partial',
+    reason: '🎯 crate_path_rules[driver_rockchip] — RK3568 驱动',
+    decision: [
+      '① 变更文件: src/driver/soc/rockchip/rk3568-clk.rs',
+      '② crate 识别: → driver crate',
+      '③ crate_path_rules 匹配: crate="driver" AND "*rk3568*"',
+      '→ <span style="color:#6ee7b7">精确选择: rk3568-pc-arceos, rk3568-pc-linux（2个）</span>',
+    ],
+    targets: ['axvisor-board-roc-rk3568-pc-arceos', 'axvisor-board-roc-rk3568-pc-linux'],
+  },
+  generic_driver: {
+    cls: 'partial',
+    reason: '🎯 crate_path_rules[driver_generic] — 通用驱动（兜底）',
+    decision: [
+      '① 变更文件: src/driver/blk/virtio.rs',
+      '② crate 识别: → driver crate',
+      '③ crate_path_rules 顺序匹配:',
+      '   driver_phytium: "*phytium*" ✗',
+      '   driver_rockchip: "*rk3568*" ✗',
+      '   driver_generic: "*" ✓（通配兜底）',
+      '→ <span style="color:#6ee7b7">精确选择: 全部 board 目标（4个）</span>',
+    ],
+    targets: [
+      'axvisor-board-phytiumpi-arceos',
+      'axvisor-board-phytiumpi-linux',
+      'axvisor-board-roc-rk3568-pc-arceos',
+      'axvisor-board-roc-rk3568-pc-linux',
+    ],
+  },
+  unknown: {
+    cls: 'full',
+    reason: '⚠️ 未匹配任何规则 → 兜底全量（no_match_fallback_all）',
+    decision: [
+      '① 变更文件: src/misc/some_feature.rs',
+      '② 非代码检查: 否',
+      '③ run_all_patterns: 无匹配',
+      '④ run_all_crates: 无匹配',
+      '⑤ selection_rules: 无匹配',
+      '⑥ crate_rules: 无匹配',
+      '⑦ crate_path_rules: 无匹配',
+      '⑧ selected 为空 → 安全兜底:',
+      '→ <span style="color:#f59e0b">全量测试（auto_reason: no_match_fallback_all）</span>',
+    ],
+    targets: ['all'],
+  },
+};
+
+const ALL_TARGETS = [
+  'axvisor-qemu-aarch64-arceos',
+  'axvisor-qemu-aarch64-linux',
+  'axvisor-qemu-x86_64-nimbos',
+  'axvisor-board-phytiumpi-arceos',
+  'axvisor-board-phytiumpi-linux',
+  'axvisor-board-roc-rk3568-pc-arceos',
+  'axvisor-board-roc-rk3568-pc-linux',
+];
+
+document.querySelectorAll('.file-tag').forEach(tag => {
+  tag.onclick = function() {
+    document.querySelectorAll('.file-tag').forEach(t => t.classList.remove('selected'));
+    this.classList.add('selected');
+    const sc = SCENARIOS[this.dataset.scenario];
+    if (!sc) return;
+
+    const activeTargets = sc.targets.includes('all') ? ALL_TARGETS : sc.targets;
+
+    // Update result card
+    const res = document.getElementById('scenario-result');
+    res.className = 'scenario-result ' + sc.cls;
+    const icon = sc.cls === 'skip' ? '⏭️ 跳过所有测试' : sc.cls === 'full' ? '🔥 全量测试' : '✅ 精确选择';
+    res.innerHTML = `
+      <div style="font-weight:700;font-size:15px;margin-bottom:8px">${icon}</div>
+      <div class="muted" style="font-size:12px">${sc.reason}</div>
+      <div style="margin-top:10px;font-size:13px">
+        触发 <strong style="color:${sc.cls==='skip'?'#94a3b8':sc.cls==='full'?'#f59e0b':'#10b981'}">${activeTargets.length} / 7</strong> 个测试目标
+      </div>
+    `;
+
+    // Update target chips
+    document.querySelectorAll('.target-chip').forEach(chip => {
+      const t = chip.dataset.target;
+      chip.classList.remove('active', 'dimmed');
+      if (activeTargets.includes(t)) chip.classList.add('active');
+      else chip.classList.add('dimmed');
+    });
+
+    // Show decision path
+    const dd = document.getElementById('decision-detail');
+    dd.style.display = 'block';
+    document.getElementById('decision-path').innerHTML =
+      sc.decision.map(d => `<div style="margin-bottom:4px">› ${d}</div>`).join('');
+  };
+});
+</script>
+</body>
+</html>
