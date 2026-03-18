@@ -39,7 +39,8 @@ on:
     inputs:
       parent_repo:
         description: 'Parent repository path (e.g., owner/repo)'
-        required: true
+        required: false
+        default: 'rcore-os/tgoskits'
         type: string
     secrets:
       PARENT_REPO_TOKEN:
