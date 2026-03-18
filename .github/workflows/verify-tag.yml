@@ -40,6 +40,8 @@ jobs:
   verify-tag:
     name: Verify Tag
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     outputs:
       should_proceed: ${{ steps.skip.outputs.should_proceed || steps.check.outputs.should_proceed }}
       is_prerelease: ${{ steps.skip.outputs.is_prerelease || steps.check.outputs.is_prerelease }}

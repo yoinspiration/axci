@@ -21,6 +21,8 @@ jobs:
   detect-targets:
     name: Detect Targets
     runs-on: self-hosted
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     outputs:
       targets: ${{ steps.detect.outputs.targets }}
       has-targets: ${{ steps.detect.outputs.has-targets }}
@@ -29,16 +31,16 @@ jobs:
       - name: Checkout component
         uses: actions/checkout@v4
 
-      - name: Download test script
+      - name: Clone test framework
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/tests.sh -o tests.sh
-          chmod +x tests.sh
+          git clone --depth 1 https://github.com/arceos-hypervisor/axci.git axci
+          chmod +x axci/tests.sh
 
       - name: Detect test targets
         id: detect
         run: |
           # 获取测试目标列表
-          TARGETS=$(./tests.sh --list-auto)
+          TARGETS=$(./axci/tests.sh --list-auto)
           echo "targets=$TARGETS" >> $GITHUB_OUTPUT
           
           # 生成 matrix 配置，包含 target 和对应的 runner
@@ -80,12 +82,33 @@ jobs:
           fi
           echo "Detected targets: $TARGETS"
 
-  # 运行测试 (matrix 并行)
-  test:
-    name: Test ${{ matrix.target }}
+  # 单元测试
+  unit-test:
+    name: Unit Test
+    runs-on: self-hosted
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout component
+        uses: actions/checkout@v4
+
+      - name: Clone test framework
+        run: |
+          git clone --depth 1 https://github.com/arceos-hypervisor/axci.git axci
+          chmod +x axci/tests.sh
+
+      - name: Run unit tests
+        run: |
+          ./axci/tests.sh unit
+
+  # 集成测试 (matrix 并行)
+  integration-test:
+    name: Integration Test ${{ matrix.target }}
     needs: detect-targets
     if: needs.detect-targets.outputs.has-targets == 'true'
     runs-on: ${{ matrix.runner }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
@@ -94,15 +117,14 @@ jobs:
       - name: Checkout component
         uses: actions/checkout@v4
 
-      - name: Download test script
+      - name: Clone test framework
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/tests.sh -o tests.sh
-          curl -fsSL https://raw.githubusercontent.com/arceos-hypervisor/axci/dev/.uboot.json -o .uboot.json
-          chmod +x tests.sh
+          git clone --depth 1 https://github.com/arceos-hypervisor/axci.git axci
+          chmod +x axci/tests.sh
 
       - name: Run test for ${{ matrix.target }}
         run: |
-          ./tests.sh -t ${{ matrix.target }} --fs --print
+          ./axci/tests.sh integration -s ${{ matrix.target }} --fs --print -v
 
   # 无测试目标时的提示
   no-tests:
