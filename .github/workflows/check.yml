@@ -1,11 +1,12 @@
 # Quality Check Workflow
 # Performs code quality checks: format, clippy, build, doc
 #
-# Default config: targets = [aarch64-unknown-none-softfloat]
+# Default config: merged targets = [aarch64-unknown-none-softfloat]
 #                 rust_components = [rust-src, clippy, rustfmt, llvm-tools]
 # Inputs:
 #   all_features: Use --all-features flag (default: true)
 #   targets: Build targets (JSON array, optional)
+#   unit_test_targets: Unit test targets (JSON array, optional)
 #   rust_components: Rust components to install (optional)
 #   skip_build: Skip build step (default: false)
 
@@ -22,7 +23,12 @@ on:
       targets:
         description: 'Build targets (JSON array)'
         required: false
-        default: '["aarch64-unknown-none-softfloat"]'
+        default: '[]'
+        type: string
+      unit_test_targets:
+        description: 'Unit test targets (JSON array)'
+        required: false
+        default: '[]'
         type: string
       rust_components:
         description: 'Rust components (comma-separated)'
@@ -36,15 +42,34 @@ on:
         type: boolean
 
 jobs:
+  prepare-targets:
+    name: Prepare Targets
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.merge.outputs.targets }}
+    steps:
+      - name: Merge targets
+        id: merge
+        run: |
+          TARGETS='${{ inputs.targets }}'
+          UNIT_TEST_TARGETS='${{ inputs.unit_test_targets }}'
+          MERGED=$(jq -cn \
+            --argjson targets "$TARGETS" \
+            --argjson unit_test_targets "$UNIT_TEST_TARGETS" \
+            '(([($targets // []), ($unit_test_targets // [])] | add) | unique) as $merged
+            | if ($merged | length) > 0 then $merged else ["aarch64-unknown-none-softfloat"] end')
+          echo "targets=$MERGED" >> "$GITHUB_OUTPUT"
+
   check:
     name: Check
     runs-on: ubuntu-latest
+    needs: prepare-targets
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(inputs.targets) }}
+        target: ${{ fromJson(needs.prepare-targets.outputs.targets) }}
 
     steps:
       - name: Checkout code

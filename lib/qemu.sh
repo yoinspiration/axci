@@ -92,10 +92,16 @@ setup_qemu_images() {
 prepare_qemu_command() {
     local target_config=$1
 
+    local target_name=$(echo "$target_config" | jq -r '.name')
     local test_cmd=$(echo "$target_config" | jq -r '.test.command')
     local build_config=$(echo "$target_config" | jq -r '.test.build_config')
     local qemu_config=$(echo "$target_config" | jq -r '.test.qemu_config')
     local vmconfigs=$(echo "$target_config" | jq -r '.test.vmconfigs')
 
-    echo "$test_cmd --build-config $build_config --qemu-config $qemu_config --vmconfigs $vmconfigs"
+    # NimbOS 需要使用 Python 包装器自动发送 usertests 命令
+    if [[ "$target_name" == *nimbos* ]]; then
+        echo "python3 scripts/ci_run_qemu_nimbos.py -- $test_cmd --build-config $build_config --qemu-config $qemu_config --vmconfigs $vmconfigs"
+    else
+        echo "$test_cmd --build-config $build_config --qemu-config $qemu_config --vmconfigs $vmconfigs"
+    fi
 }
