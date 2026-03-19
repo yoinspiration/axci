@@ -29,7 +29,7 @@ jobs:
       matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - name: Checkout component
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Clone test framework
         run: |
@@ -90,7 +90,7 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout component
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Clone test framework
         run: |
@@ -115,7 +115,7 @@ jobs:
         include: ${{ fromJson(needs.detect-targets.outputs.matrix) }}
     steps:
       - name: Checkout component
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Clone test framework
         run: |
