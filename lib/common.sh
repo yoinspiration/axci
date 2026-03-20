@@ -4,7 +4,7 @@
 #
 
 # 防止重复加载
-[[ -n "$_COMMON_SH_LOADED" ]] && return 0
+[[ -n "${_COMMON_SH_LOADED:-}" ]] && return 0
 _COMMON_SH_LOADED=1
 
 # 颜色定义

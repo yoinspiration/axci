@@ -4,25 +4,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd -P)
 CRATES_FILE="${SCRIPT_DIR}/crates.txt"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# =============================================================================
-# Colors and Output Functions
-# =============================================================================
-
-if [[ -t 1 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m'
-else
-    RED='' GREEN='' YELLOW='' BLUE='' NC=''
-fi
-
-die() { printf '%b✗%b %s\n' "${RED}" "${NC}" "$*" >&2; exit 1; }
-info() { printf '%b→%b %s\n' "${BLUE}" "${NC}" "$*"; }
-success() { printf '%b✓%b %s\n' "${GREEN}" "${NC}" "$*"; }
-warn() { printf '%b⚠%b %s\n' "${YELLOW}" "${NC}" "$*"; }
+die() { error "$*"; }
+info() { log "$*"; }
+success() { log_success "$*"; }
+warn() { log_warn "$*"; }
 
 # =============================================================================
 # Configuration
@@ -33,6 +20,10 @@ RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links"
 FILTER_TARGETS=""
 CRATE_NAME=""
 COMPONENT_DIR=""
+ALL_FEATURES=true
+SKIP_BUILD=false
+LIST_TARGETS_JSON=false
+ONLY_STAGE=""
 
 # =============================================================================
 # Helper Functions
@@ -53,6 +44,11 @@ usage() {
   -c, --component-dir DIR    组件目录 (直接检查指定目录，无需 crate 名称)
   --targets TRIPLE[,TRIPLE,...]  编译目标三元组 (如: aarch64-unknown-none-softfloat)
                              优先级: CLI > config.json targets > 默认值
+  --all-features             检查时附加 --all-features (默认)
+  --no-all-features          检查时不附加 --all-features
+  --skip-build               跳过 cargo build
+  --list-targets-json        输出最终解析后的 targets JSON 数组
+  --only STAGE              仅运行指定阶段: fmt|build|clippy|doc
   -h, --help                 显示此帮助
 
 可用的目标架构:
@@ -89,6 +85,26 @@ parse_args() {
                 ;;
             --targets)
                 FILTER_TARGETS="$2"
+                shift 2
+                ;;
+            --all-features)
+                ALL_FEATURES=true
+                shift
+                ;;
+            --no-all-features)
+                ALL_FEATURES=false
+                shift
+                ;;
+            --skip-build)
+                SKIP_BUILD=true
+                shift
+                ;;
+            --list-targets-json)
+                LIST_TARGETS_JSON=true
+                shift
+                ;;
+            --only)
+                ONLY_STAGE="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -145,6 +161,16 @@ resolve_targets() {
     echo "${targets_input}"
 }
 
+targets_to_json() {
+    local targets="$1"
+    echo "${targets}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | jq -R . | jq -s -c
+}
+
+should_run_stage() {
+    local stage="$1"
+    [[ -z "${ONLY_STAGE}" || "${ONLY_STAGE}" == "${stage}" ]]
+}
+
 # =============================================================================
 # Check Functions
 # =============================================================================
@@ -160,7 +186,11 @@ check_fmt() {
 
 check_build() {
     info "[$1] 构建检查 (target: $2)"
-    if cargo build --target "$2" --all-features >/dev/null 2>&1; then
+    local feature_args=()
+    if [[ "${ALL_FEATURES}" == true ]]; then
+        feature_args+=(--all-features)
+    fi
+    if cargo build --target "$2" "${feature_args[@]}" >/dev/null 2>&1; then
         success "[$1] 构建检查通过"
     else
         die "[$1] 构建检查失败"
@@ -169,7 +199,11 @@ check_build() {
 
 check_clippy() {
     info "[$1] Clippy 检查"
-    if cargo clippy --target "$2" --all-features -- -D warnings >/dev/null 2>&1; then
+    local feature_args=()
+    if [[ "${ALL_FEATURES}" == true ]]; then
+        feature_args+=(--all-features)
+    fi
+    if cargo clippy --target "$2" "${feature_args[@]}" -- -D warnings >/dev/null 2>&1; then
         success "[$1] Clippy 检查通过"
     else
         die "[$1] Clippy 检查失败"
@@ -178,7 +212,11 @@ check_clippy() {
 
 check_doc() {
     info "[$1] 文档构建检查"
-    if RUSTDOCFLAGS="${RUSTDOCFLAGS}" cargo doc --no-deps --target "$2" --all-features >/dev/null 2>&1; then
+    local feature_args=()
+    if [[ "${ALL_FEATURES}" == true ]]; then
+        feature_args+=(--all-features)
+    fi
+    if RUSTDOCFLAGS="${RUSTDOCFLAGS}" cargo doc --no-deps --target "$2" "${feature_args[@]}" >/dev/null 2>&1; then
         success "[$1] 文档构建检查通过"
     else
         die "[$1] 文档构建检查失败"
@@ -194,10 +232,18 @@ check_crate() {
     printf '\n%b========== %s ==========%b\n' "${BLUE}" "${crate}" "${NC}"
     
     pushd "${crate_dir}" >/dev/null
-    check_fmt "${crate}" || { popd >/dev/null; return 1; }
-    check_build "${crate}" "${target}"
-    check_clippy "${crate}" "${target}"
-    check_doc "${crate}" "${target}"
+    if should_run_stage fmt; then
+        check_fmt "${crate}" || { popd >/dev/null; return 1; }
+    fi
+    if should_run_stage build && [[ "${SKIP_BUILD}" != true ]]; then
+        check_build "${crate}" "${target}"
+    fi
+    if should_run_stage clippy; then
+        check_clippy "${crate}" "${target}"
+    fi
+    if should_run_stage doc; then
+        check_doc "${crate}" "${target}"
+    fi
     popd >/dev/null
     
     success "[${crate}] 所有检查通过"
@@ -214,10 +260,18 @@ check_component_dir() {
     printf '\n%b========== %s ==========%b\n' "${BLUE}" "${crate_name}" "${NC}"
     
     pushd "${COMPONENT_DIR}" >/dev/null
-    check_fmt "${crate_name}" || { popd >/dev/null; return 1; }
-    check_build "${crate_name}" "${target}"
-    check_clippy "${crate_name}" "${target}"
-    check_doc "${crate_name}" "${target}"
+    if should_run_stage fmt; then
+        check_fmt "${crate_name}" || { popd >/dev/null; return 1; }
+    fi
+    if should_run_stage build && [[ "${SKIP_BUILD}" != true ]]; then
+        check_build "${crate_name}" "${target}"
+    fi
+    if should_run_stage clippy; then
+        check_clippy "${crate_name}" "${target}"
+    fi
+    if should_run_stage doc; then
+        check_doc "${crate_name}" "${target}"
+    fi
     popd >/dev/null
     
     success "[${crate_name}] 所有检查通过"
@@ -270,12 +324,18 @@ check_all() {
 main() {
     parse_args "$@"
     
+    local resolved_targets
+    resolved_targets="$(resolve_targets)"
+
+    if [[ "${LIST_TARGETS_JSON}" == true ]]; then
+        targets_to_json "${resolved_targets}"
+        exit 0
+    fi
+    
     # 如果指定了 --component-dir，直接检查该目录
     if [[ -n "${COMPONENT_DIR}" ]]; then
-        # 解析目标
-        local targets=$(resolve_targets)
         local targets_array=()
-        IFS=',' read -ra targets_array <<< "${targets}"
+        IFS=',' read -ra targets_array <<< "${resolved_targets}"
         
         info "组件目录: ${COMPONENT_DIR}"
         info "检查目标: ${targets_array[*]}"
@@ -308,10 +368,8 @@ main() {
         exit 0
     fi
     
-    # 解析目标
-    local targets=$(resolve_targets)
     local targets_array=()
-    IFS=',' read -ra targets_array <<< "${targets}"
+    IFS=',' read -ra targets_array <<< "${resolved_targets}"
     
     info "检查目标: ${targets_array[*]}"
     cd "${ROOT_DIR}"

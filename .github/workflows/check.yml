@@ -25,11 +25,6 @@ on:
         required: false
         default: '[]'
         type: string
-      unit_test_targets:
-        description: 'Unit test targets (JSON array)'
-        required: false
-        default: '[]'
-        type: string
       rust_components:
         description: 'Rust components (comma-separated)'
         required: false
@@ -46,19 +41,26 @@ jobs:
     name: Prepare Targets
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.merge.outputs.targets }}
+      targets: ${{ steps.resolve.outputs.targets }}
     steps:
-      - name: Merge targets
-        id: merge
+      - name: Checkout caller repo
+        uses: actions/checkout@v5
+
+      - name: Clone test framework
         run: |
-          TARGETS='${{ inputs.targets }}'
-          UNIT_TEST_TARGETS='${{ inputs.unit_test_targets }}'
-          MERGED=$(jq -cn \
-            --argjson targets "$TARGETS" \
-            --argjson unit_test_targets "$UNIT_TEST_TARGETS" \
-            '(([($targets // []), ($unit_test_targets // [])] | add) | unique) as $merged
-            | if ($merged | length) > 0 then $merged else ["aarch64-unknown-none-softfloat"] end')
-          echo "targets=$MERGED" >> "$GITHUB_OUTPUT"
+          git clone --depth 1 https://github.com/arceos-hypervisor/axci.git axci
+          chmod +x axci/check.sh
+
+      - name: Resolve targets
+        id: resolve
+        run: |
+          TARGETS_ARG=""
+          TARGETS_JSON='${{ inputs.targets }}'
+          if [ "$TARGETS_JSON" != "[]" ]; then
+            TARGETS_ARG="--targets $(echo "$TARGETS_JSON" | jq -r 'join(",")')"
+          fi
+          TARGETS=$(bash ./axci/check.sh --component-dir . $TARGETS_ARG --list-targets-json)
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
 
   check:
     name: Check
@@ -72,8 +74,13 @@ jobs:
         target: ${{ fromJson(needs.prepare-targets.outputs.targets) }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout caller repo
         uses: actions/checkout@v5
+
+      - name: Clone test framework
+        run: |
+          git clone --depth 1 --branch ndev https://github.com/arceos-hypervisor/axci.git axci
+          chmod +x axci/check.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -84,32 +91,32 @@ jobs:
       - name: Check rust version
         run: rustc --version --verbose
 
-      - name: Check code format
-        run: cargo fmt --all -- --check
+      - name: Run fmt
+        run: |
+          FLAGS="--component-dir . --targets ${{ matrix.target }}"
+          bash ./axci/check.sh $FLAGS --only fmt
 
-      - name: Build
+      - name: Run build
         if: ${{ inputs.skip_build != true }}
         run: |
-          if [ "${{ inputs.all_features }}" = "true" ]; then
-            cargo build --target ${{ matrix.target }} --all-features
-          else
-            cargo build --target ${{ matrix.target }}
+          FLAGS="--component-dir . --targets ${{ matrix.target }}"
+          if [ "${{ inputs.all_features }}" != "true" ]; then
+            FLAGS="$FLAGS --no-all-features"
           fi
+          bash ./axci/check.sh $FLAGS --only build
 
       - name: Run clippy
         run: |
-          if [ "${{ inputs.all_features }}" = "true" ]; then
-            cargo clippy --target ${{ matrix.target }} --all-features -- -D warnings
-          else
-            cargo clippy --target ${{ matrix.target }} -- -D warnings
+          FLAGS="--component-dir . --targets ${{ matrix.target }}"
+          if [ "${{ inputs.all_features }}" != "true" ]; then
+            FLAGS="$FLAGS --no-all-features"
           fi
+          bash ./axci/check.sh $FLAGS --only clippy
 
-      - name: Build documentation
-        env:
-          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D missing-docs
+      - name: Run doc
         run: |
-          if [ "${{ inputs.all_features }}" = "true" ]; then
-            cargo doc --no-deps --target ${{ matrix.target }} --all-features
-          else
-            cargo doc --no-deps --target ${{ matrix.target }}
+          FLAGS="--component-dir . --targets ${{ matrix.target }}"
+          if [ "${{ inputs.all_features }}" != "true" ]; then
+            FLAGS="$FLAGS --no-all-features"
           fi
+          bash ./axci/check.sh $FLAGS --only doc

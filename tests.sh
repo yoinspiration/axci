@@ -32,7 +32,6 @@ COMPONENT_DIR=""
 CONFIG_FILE=""
 TEST_TARGET="all"
 FILTER_TARGETS=""
-FILTER_UNIT_TARGETS=""
 FILTER_SUITE=""
 VERBOSE=false
 CLEANUP=true
@@ -46,6 +45,7 @@ LIST_JSON=false
 LIST_AUTO=false
 USE_FS_MODE=false
 PRINT_OUTPUT=false
+UNIT_TEST_TRIPLES=""
 
 # 帮助信息
 show_help() {
@@ -61,8 +61,6 @@ Hypervisor Test Framework - 本地测试脚本
   --targets TRIPLE[,TRIPLE,...]  编译目标三元组 (如: aarch64-unknown-none-softfloat)
                              用于集成测试架构过滤，支持前缀匹配
                              优先级: CLI > config.json targets > rust-toolchain.toml 自动检测
-  --unit-targets TRIPLE      单元测试目标 (如: aarch64-unknown-none-softfloat)
-                             优先级: CLI > config.json unit_test_targets > 跳过单元测试
   --suite NAME[,NAME,...]    测试套件过滤 (如: axvisor-qemu,starry-aarch64)
                              支持精确名称和前缀匹配 (axvisor-qemu 匹配 axvisor-qemu-*)
                              优先级: CLI > config.json test_targets > 全部
@@ -113,7 +111,6 @@ Hypervisor Test Framework - 本地测试脚本
   test.sh integration                             # 仅集成测试
   test.sh integration --targets aarch64-unknown-none-softfloat  # 指定目标
   test.sh integration --suite axvisor-qemu        # 仅 axvisor-qemu 系列
-  test.sh all --unit-targets aarch64-unknown-none-softfloat --suite axvisor-qemu
   test.sh --dry-run -v                            # 显示将要执行的命令
 
 EOF
@@ -137,10 +134,6 @@ parse_args() {
                 ;;
             --targets)
                 FILTER_TARGETS="$2"
-                shift 2
-                ;;
-            --unit-targets)
-                FILTER_UNIT_TARGETS="$2"
                 shift 2
                 ;;
             -s|--suite)
@@ -261,33 +254,31 @@ resolve_targets() {
     fi
 }
 
-# 解析单元测试目标
-# 优先级: CLI --unit-targets > config.json unit_test_targets > 跳过单元测试
-# 设置全局变量: UNIT_TEST_TRIPLES - 空格分隔的完整 triple，为空则跳过单元测试
+is_std_target_triple() {
+    local triple="$1"
+
+    case "$triple" in
+        *-linux-*|*-darwin-*|*-windows-*|*-freebsd-*|*-netbsd-*|*-openbsd-*|*-dragonfly-*|*-android-*|*-ios-*)
+            return 0
+            ;;
+        *-none-*|*-unknown-none|*-unknown-none-*|*-elf)
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 resolve_unit_test_targets() {
-    local targets_input="$FILTER_UNIT_TARGETS"
-
-    # CLI 未指定，尝试 config.json 的 unit_test_targets 字段
-    if [ -z "$targets_input" ]; then
-        local config_targets=$(echo "$CONFIG" | jq -r '.unit_test_targets // [] | join(",")' 2>/dev/null)
-        if [ -n "$config_targets" ]; then
-            targets_input="$config_targets"
-        fi
-    fi
-
-    # 仍为空，跳过单元测试
-    if [ -z "$targets_input" ]; then
-        UNIT_TEST_TRIPLES=""
-        return
-    fi
-
-    # 解析
     local triples=()
-    IFS=',' read -ra items <<< "$targets_input"
-    for item in "${items[@]}"; do
-        item=$(echo "$item" | xargs)
-        [ -z "$item" ] && continue
-        triples+=("$item")
+
+    for triple in $RESOLVED_TRIPLES; do
+        if is_std_target_triple "$triple"; then
+            triples+=("$triple")
+        else
+            log_debug "跳过 no_std 单元测试目标: $triple"
+        fi
     done
 
     UNIT_TEST_TRIPLES="${triples[*]}"
@@ -588,7 +579,7 @@ run_unit_tests() {
 
     # 未指定单元测试目标，跳过
     if [ -z "$UNIT_TEST_TRIPLES" ]; then
-        log "跳过单元测试 (未配置 unit_test_targets)"
+        log "跳过单元测试 (基础 targets 中没有可运行的 std target)"
         echo "skipped" > "$status_file"
         return 2
     fi

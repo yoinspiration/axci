@@ -292,8 +292,7 @@ load_config() {
         local has_targets=$(echo "$CONFIG" | jq 'has("test_targets")')
         if [ "$has_targets" != "true" ]; then
             log "配置文件不包含 test_targets，使用默认测试目标"
-            # 保留原有的 targets 和 unit_test_targets 字段
-            local original_targets=$(echo "$CONFIG" | jq -c '{targets, unit_test_targets}')
+            local original_targets=$(echo "$CONFIG" | jq -c '{targets}')
             CONFIG=$(echo "$original_targets" | jq -c '. + {"component":{"name":"'"$COMPONENT_NAME"'","crate_name":"'"$COMPONENT_CRATE"'"},"test_targets":'"$DEFAULT_TARGETS"'}')
         fi
     else
