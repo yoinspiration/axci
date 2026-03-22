@@ -742,6 +742,12 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Demo delay for serialization visibility
+        if: matrix.type == 'board' && steps.board_guard.outputs.run_board == 'true'
+        run: |
+          echo "Holding board lock for 90s to demonstrate serial execution (同板卡串行)..."
+          sleep 90
+
       - name: Run Board tests
         if: matrix.type == 'board' && steps.board_guard.outputs.run_board == 'true'
         working-directory: axvisor
